@@ -1,45 +1,15 @@
 // services/geminiService.ts
-// FIX: Đảm bảo endpoint đúng là /api/generate (KHÔNG có số 1)
+// Sử dụng GEMINI_API_KEY từ Vercel Environment Variables
 
-let freePool: string[] = [];
-let paidPool: string[] = [];
-let freeIndex = 0;
-let paidIndex = 0;
-
-export function setKeyPools(free: string[], paid: string[]) {
-  freePool = free.filter(k => k && k.trim().length > 0);
-  paidPool = paid.filter(k => k && k.trim().length > 0);
-  freeIndex = 0;
-  paidIndex = 0;
-  console.log(`🔑 Key Pool Loaded → ${freePool.length} Free, ${paidPool.length} Paid`);
-}
-
-function getNextUserKey(): string | null {
-  if (paidPool.length > 0) {
-    const key = paidPool[paidIndex % paidPool.length];
-    paidIndex++;
-    return key;
-  }
-  if (freePool.length > 0) {
-    const key = freePool[freeIndex % freePool.length];
-    freeIndex++;
-    return key;
-  }
-  return null;
-}
-
-// CRITICAL FIX: Endpoint phải là "/api/generate" chứ KHÔNG phải "/api/generate1"
+// CRITICAL: Endpoint đúng là "/api/generate"
 async function callBackend(prompt: string, imageBase64?: string) {
   try {
     const body: any = { prompt };
     if (imageBase64) body.image = imageBase64;
 
-    const userKey = getNextUserKey();
-    if (userKey) body.userKey = userKey;
-
     console.log('🚀 Calling API:', '/api/generate');
 
-    const res = await fetch("/api/generate", {  // ← FIX: Đúng endpoint
+    const res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
