@@ -128,8 +128,12 @@ function App() {
   };
 
   const handleQuotaError = (err: any) => {
-     const errorMessage = err.message || err.toString();
-     setError(errorMessage || "Failed to process.");
+     console.error("Quota Error:", err);
+     let errorMessage = err.message || "An unexpected error occurred.";
+     if (errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("exhausted")) {
+        errorMessage = "Server busy (Rate Limit Hit). Please wait 10-15 seconds and try again.";
+     }
+     setError(errorMessage);
   };
 
   const startQuickClean = async (image: string) => {
@@ -311,9 +315,9 @@ function App() {
       <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30 relative">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center text-xs text-slate-400">
-             <div className="flex items-center bg-amber-950/30 text-amber-300 px-3 py-1.5 rounded-full border border-amber-800/50">
-                  <Crown className="w-3.5 h-3.5 mr-1.5" />
-                  <span className="font-bold">Team3T Pro Keys (Paid Billing)</span>
+             <div className="flex items-center bg-green-950/30 text-green-300 px-3 py-1.5 rounded-full border border-green-800/50">
+                  <Zap className="w-3.5 h-3.5 mr-1.5" />
+                  <span className="font-bold">Using Vercel Environment Key</span>
              </div>
           </div>
         </div>
