@@ -35,17 +35,7 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
 
 // --- EXPORTED SERVICES ---
 
-// 1. Configuration (No-op now as we use process.env.API_KEY)
-export const setKeyPools = (free: string[], paid: string[]) => {
-  console.log("Key pools are managed via Environment Variables in this version.");
-};
-
-// 2. Validation (No longer needed for UI, but kept for compatibility if imported)
-export const validateToken = async (token: string): Promise<boolean> => {
-  return true; 
-};
-
-// 3. Cleanup
+// 1. Cleanup
 export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
   return executeWithRetry(async () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -71,7 +61,7 @@ export const cleanupProductImage = async (imageBase64: string): Promise<string> 
   });
 };
 
-// 4. Analysis
+// 2. Analysis
 export const analyzeProductDesign = async (
     imageBase64: string, 
     productType: string,
@@ -80,7 +70,6 @@ export const analyzeProductDesign = async (
     
     return executeWithRetry(async () => {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        // Use Flash for speed and reliability in standard env
         const activeModel = 'gemini-2.5-flash';
 
         const isAutoDetect = productType === "Auto-Detect / Random";
@@ -137,7 +126,7 @@ export const analyzeProductDesign = async (
     });
   };
 
-// 5. Extract Elements
+// 3. Extract Elements
 export const extractDesignElements = async (imageBase64: string): Promise<string[]> => {
   const prompts = [
     "Crop and isolate the main CHARACTER or central figure.",
@@ -175,7 +164,7 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
   return results;
 };
 
-// 6. Generate Redesigns
+// 4. Generate Redesigns
 export const generateProductRedesigns = async (
     basePrompt: string,
     ropeType: RopeType,
@@ -221,11 +210,6 @@ export const generateProductRedesigns = async (
             const img = await executeWithRetry(async () => {
                  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
                  
-                 // Try Imagen 4.0 first if possible, else Flash
-                 // Note: Imagen needs specific quotas. We default to Flash Image for reliability on standard keys.
-                 // If you want to use Imagen, uncomment logic, but Flash Image is safer for general 'gemini-api' keys.
-                 // We will stick to gemini-2.5-flash-image per guidelines for general tasks unless requested.
-                 
                  const response = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image',
                     contents: { parts: [{ text: finalPrompt }] }
@@ -246,7 +230,7 @@ export const generateProductRedesigns = async (
     return results;
 };
 
-// 7. Remix
+// 5. Remix
 export const remixProductImage = async (imageBase64: string, instruction: string): Promise<string> => {
     const prompt = `Image Editor. Instruction: ${instruction}. Preserve Text spelling exactly.`;
     
@@ -271,7 +255,7 @@ export const remixProductImage = async (imageBase64: string, instruction: string
     });
 };
 
-// 8. Split Characters
+// 6. Split Characters
 export const detectAndSplitCharacters = async (imageBase64: string): Promise<string[]> => {
     return executeWithRetry(async () => {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -318,7 +302,7 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
     });
 };
 
-// 9. Random Mockup
+// 7. Random Mockup
 export const generateRandomMockup = async (imageBase64: string): Promise<string> => {
     return executeWithRetry(async () => {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
