@@ -1,52 +1,90 @@
-import { GoogleGenAI } from "@google/genai";
+import type { NextApiRequest, NextApiResponse } from "next";
 
-export default async function handler(req, res) {
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "15mb", // cho phép nhận hình lớn
+    },
+  },
+};
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method Not Allowed" });
+  }
+
   try {
-    if (req.method !== "POST") {
-      return res.status(405).json({ error: "Only POST allowed" });
+    const { prompt, image, mode } = req.body;
+
+    if (!prompt && !image) {
+      return res.status(400).json({ error: "Missing prompt or image" });
     }
 
-    // data from frontend
-    const { prompt, imageBase64 } = req.body;
-
-    if (!prompt) {
-      return res.status(400).json({ error: "Missing prompt" });
+    const token = process.env.ULTRA_TOKEN;
+    if (!token) {
+      return res.status(400).json({ error: "Missing ULTRA_TOKEN environment variable" });
     }
 
-    // Ultra token from Vercel environment variable
-    const ultraToken = process.env.GOOGLE_ULTRA_TOKEN;
-    if (!ultraToken) {
-      return res.status(500).json({ error: "Missing GOOGLE_ULTRA_TOKEN" });
-    }
+    // gọi Google API Pro
+    const apiURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp:generateContent";
 
-    // Custom FETCH using Bearer token (server OK)
-    const customFetch = (url, init) => {
-      const headers = new Headers(init?.headers || {});
-      headers.set("Authorization", `Bearer ${ultraToken}`);
-      headers.delete("x-goog-api-key");
-      return fetch(url, { ...init, headers });
+    const payload: any = {
+      contents: [
+        {
+          parts: [],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.8,
+        topP: 0.95,
+        topK: 40,
+      },
     };
 
-    const ai = new GoogleGenAI({
-      apiKey: "dummy-key", // required but ignored
-      fetch: customFetch
+    if (prompt) {
+      payload.contents[0].parts.push({ text: prompt });
+    }
+
+    if (image) {
+      payload.contents[0].parts.push({
+        inlineData: {
+          data: image.replace(/^data:image\/\w+;base64,/, ""),
+          mimeType: "image/png",
+        },
+      });
+    }
+
+    const googleRes = await fetch(`${apiURL}?key=${token}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-image",
-      contents: {
-        parts: [
-          ...(imageBase64
-            ? [{ inlineData: { mimeType: "image/jpeg", data: imageBase64.replace(/^data:image\/\w+;base64,/, "") } }]
-            : []),
-          { text: prompt }
-        ]
-      }
+    const json = await googleRes.json();
+
+    // Nếu Google trả lỗi
+    if (json.error) {
+      console.error("Google API ERROR:", json.error);
+      return res.status(400).json({ error: json.error.message });
+    }
+
+    // Trích image từ response (nếu có)
+    let base64Image = null;
+
+    try {
+      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const match = text.match(/data:image\/png;base64,([A-Za-z0-9+/=]+)/);
+      if (match) base64Image = match[0];
+    } catch (e) {}
+
+    return res.status(200).json({
+      ok: true,
+      image: base64Image,
+      raw: json,
     });
 
-    return res.status(200).json(response);
-  } catch (err) {
-    console.error("API Error:", err);
-    return res.status(500).json({ error: err.message });
+  } catch (err: any) {
+    console.error("SERVER ERROR:", err);
+    return res.status(500).json({ error: err.message || "Server Error" });
   }
 }
