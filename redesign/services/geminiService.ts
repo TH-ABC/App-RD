@@ -1,7 +1,6 @@
 // services/geminiService.ts
 // Sử dụng GEMINI_API_KEY từ Vercel Environment Variables
 
-// CRITICAL: Endpoint đúng là "/api/generate"
 async function callBackend(prompt: string, imageBase64?: string) {
   try {
     const body: any = { prompt };
