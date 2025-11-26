@@ -1,132 +1,214 @@
-// services/geminiService.ts (Dạng B — Frontend dùng Backend Proxy /api/generate)
-// Frontend KHÔNG gọi GoogleGenAI trực tiếp nữa. Mọi thứ đi qua backend.
+// services/geminiService.ts
+//---------------------------------------------------------
+// TẤT CẢ GỌI GOOGLE API ĐỀU CHUYỂN HẾT SANG /api/generate
+//---------------------------------------------------------
 
-/* ---------------------------------------------------------
-   Helper chung để gọi /api/generate
---------------------------------------------------------- */
-async function callApi(action: string, payload: any) {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action, ...payload })
-  });
+// Nếu sau này bạn muốn xoay key user → thêm lại keyPool logic bên dưới
+let freePool: string[] = [];
+let paidPool: string[] = [];
+let freeIndex = 0;
+let paidIndex = 0;
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`API /api/generate error (${res.status}): ${text}`);
-  }
-
-  // Giả định backend luôn trả JSON
-  return res.json();
+export function setKeyPools(free: string[], paid: string[]) {
+  freePool = free;
+  paidPool = paid;
+  freeIndex = 0;
+  paidIndex = 0;
+  console.log(`KeyPools Loaded: ${free.length} free, ${paid.length} paid`);
 }
 
-/* ---------------------------------------------------------
-   1. setKeyPools — Dạng B không dùng nữa, để cho code cũ không lỗi import
---------------------------------------------------------- */
-export const setKeyPools = (_free?: string[], _paid?: string[]) => {
-  // Không làm gì cả ở Dạng B
-  return;
-};
+function getNextUserKey(): string | null {
+  if (paidPool.length > 0) {
+    const key = paidPool[paidIndex % paidPool.length];
+    paidIndex++;
+    return key;
+  }
+  if (freePool.length > 0) {
+    const key = freePool[freeIndex % freePool.length];
+    freeIndex++;
+    return key;
+  }
+  return null;
+}
 
-/* ---------------------------------------------------------
-   2. Validate token (nếu cần)
---------------------------------------------------------- */
-export const validateToken = async (): Promise<boolean> => {
-  const data = await callApi("validate", {});
-  return data.ok === true;
-};
+//---------------------------------------------------------
+// BACKEND REQUEST WRAPPER
+//---------------------------------------------------------
+async function callBackend(prompt: string, imageBase64?: string) {
+  try {
+    const body: any = { prompt };
 
-/* ---------------------------------------------------------
-   3. Cleanup product image (remove background, enhance)
---------------------------------------------------------- */
-export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
-  const data = await callApi("cleanup", { image: imageBase64 });
-  // Backend trả về { result: "data:image/..." }
-  return data.result;
-};
+    if (imageBase64) {
+      body.image = imageBase64;
+    }
 
-/* ---------------------------------------------------------
-   4. Analyze product design
---------------------------------------------------------- */
-export const analyzeProductDesign = async (
+    // Nếu user có key → gửi kèm xuống backend
+    const userKey = getNextUserKey();
+    if (userKey) body.userKey = userKey;
+
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const json = await res.json();
+
+    if (!res.ok) {
+      throw new Error(json.error || "Backend error");
+    }
+
+    return json;
+  } catch (err: any) {
+    console.error("Backend call failed:", err);
+    throw err;
+  }
+}
+
+//---------------------------------------------------------
+// 1️⃣ CLEANUP IMAGE — REMOVE BACKGROUND
+//---------------------------------------------------------
+export async function cleanupProductImage(imageBase64: string): Promise<string> {
+  const prompt =
+    "Remove background, isolate object, clean edges, return image in pure PNG format base64.";
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
+}
+
+//---------------------------------------------------------
+// 2️⃣ ANALYZE PRODUCT DESIGN
+//---------------------------------------------------------
+export async function analyzeProductDesign(
   imageBase64: string,
   productType: string,
-  designMode: string
-): Promise<any> => {
-  const data = await callApi("analyze", {
-    image: imageBase64,
-    productType,
-    designMode
-  });
-  // Backend trả { result: {...ProductAnalysis} }
-  return data.result;
-};
+  designMode: any
+) {
+  const prompt = `
+You are a senior product design analyzer.
+Analyze the uploaded product and return JSON fields:
+- title
+- short_description
+- long_description
+- redesignPrompt (the best prompt to send for redesign generation)
+- detected_type
+- enhance_strategy
 
-/* ---------------------------------------------------------
-   5. Extract design elements (frames)
---------------------------------------------------------- */
-export const extractDesignElements = async (imageBase64: string): Promise<string[]> => {
-  const data = await callApi("extract", { image: imageBase64 });
-  // Backend trả { results: [img1, img2, ...] }
-  return data.results || [];
-};
+Product Type: ${productType}
+Mode: ${designMode}
+Return JSON only.
+`;
 
-/* ---------------------------------------------------------
-   6. Generate product redesigns (6 images)
---------------------------------------------------------- */
-export const generateProductRedesigns = async (
-  basePrompt: string,
-  ropeType: string,
-  selectedComponents: string[],
-  userNotes: string,
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    return JSON.parse(text);
+  } catch (e) {
+    console.warn("JSON parse fail → returning fallback analysis");
+    return {
+      title: "Unknown",
+      short_description: "",
+      long_description: "",
+      redesignPrompt: "Create a clean modern redesign.",
+      detected_type: productType,
+      enhance_strategy: "basic",
+    };
+  }
+}
+
+//---------------------------------------------------------
+// 3️⃣ EXTRACT DESIGN ELEMENTS
+//---------------------------------------------------------
+export async function extractDesignElements(imageBase64: string) {
+  const prompt = `
+Extract key design elements (objects, patterns, textures, icons, colors).
+Return JSON array only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
+    return JSON.parse(text);
+  } catch {
+    return [];
+  }
+}
+
+//---------------------------------------------------------
+// 4️⃣ GENERATE PRODUCT REDESIGNS
+//---------------------------------------------------------
+export async function generateProductRedesigns(
+  redesignPrompt: string,
+  ropeType: any,
+  extraRefs: string[],
+  override: string,
   productType: string,
-  useUltraFlag: boolean
-): Promise<string[]> => {
-  const data = await callApi("redesign", {
-    basePrompt,
-    ropeType,
-    selectedComponents,
-    userNotes,
-    productType,
-    useUltraFlag
-  });
-  // Backend trả { results: [img...] }
-  return data.results || [];
-};
+  useUltra?: boolean
+) {
+  const prompt = `
+Using the following design brief:
+${redesignPrompt}
 
-/* ---------------------------------------------------------
-   7. Remix product image theo instruction
---------------------------------------------------------- */
-export const remixProductImage = async (
-  imageBase64: string,
-  instruction: string
-): Promise<string> => {
-  const data = await callApi("remix", {
-    image: imageBase64,
-    instruction
-  });
-  // Backend trả { result: "data:image/..." }
-  return data.result;
-};
+Generate 6 unique product redesigns.
+Return each result as PNG base64 only, separated clearly.
+`;
 
-/* ---------------------------------------------------------
-   8. Detect & split characters
---------------------------------------------------------- */
-export const detectAndSplitCharacters = async (
-  imageBase64: string
-): Promise<string[]> => {
-  const data = await callApi("splitCharacters", { image: imageBase64 });
-  // Backend trả { results: [img1, img2, ...] }
-  return data.results || [];
-};
+  const result = await callBackend(prompt);
 
-/* ---------------------------------------------------------
-   9. Generate random mockup
---------------------------------------------------------- */
-export const generateRandomMockup = async (
-  imageBase64: string
-): Promise<string> => {
-  const data = await callApi("mockup", { image: imageBase64 });
-  // Backend trả { result: "data:image/..." }
-  return data.result;
-};
+  // Extract images from response
+  const rawText =
+    result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+  const matches = rawText.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/g);
+
+  return matches || [];
+}
+
+//---------------------------------------------------------
+// 5️⃣ REMIX IMAGE
+//---------------------------------------------------------
+export async function remixProductImage(imageBase64: string, instruction: string) {
+  const prompt = `
+Modify the uploaded image with these instructions:
+${instruction}
+Return PNG base64 only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
+}
+
+//---------------------------------------------------------
+// 6️⃣ SPLIT MULTIPLE CHARACTERS / OBJECTS
+//---------------------------------------------------------
+export async function detectAndSplitCharacters(imageBase64: string) {
+  const prompt = `
+Detect individual objects/characters in the image.
+Return each object separated as a cropped PNG base64.
+Return JSON array of base64 strings.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
+    return JSON.parse(text);
+  } catch {
+    return [];
+  }
+}
+
+//---------------------------------------------------------
+// 7️⃣ GENERATE MOCKUP
+//---------------------------------------------------------
+export async function generateRandomMockup(imageBase64: string) {
+  const prompt = `
+Place this product image into a premium mockup scene (studio lighting, clean background).
+Return PNG base64 only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
+}
