@@ -1,695 +1,525 @@
-import React, { useState, useRef, useEffect } from "react";
-import {
-  cleanupProductImage,
-  analyzeProductDesign,
-  generateProductRedesigns,
-  remixProductImage,
-  detectAndSplitCharacters,
-  generateRandomMockup,
-  extractDesignElements
-} from "./services/geminiService";
-
-type Step = "upload" | "analyze" | "redesign" | "remix" | "mockup";
+import React, { useState, useEffect } from 'react';
+import { Header } from './components/Header';
+import { FileUpload } from './components/FileUpload';
+import { ResultsPanel } from './components/ResultsPanel';
+import { HistorySidebar } from './components/HistorySidebar';
+import { ApiKeyModal } from './components/ApiKeyModal';
+import { RedesignDetailModal } from './components/RedesignDetailModal';
+import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, detectAndSplitCharacters, generateRandomMockup } from './services/geminiService';
+import { sendDataToSheet } from './services/googleSheetService';
+import { ProductAnalysis, ProcessStage, PRODUCT_TYPES, HistoryItem, DesignMode, RopeType } from './types';
+import { AlertCircle, RefreshCw, Key, Layers, Eraser, Sparkles, Zap, Package, Wand2, Paintbrush, AlertTriangle } from 'lucide-react';
 
 function App() {
-  // ===== STATE MANAGEMENT =====
-  const [step, setStep] = useState<Step>("upload");
-  const [originalImage, setOriginalImage] = useState<string>("");
-  const [cleanedImage, setCleanedImage] = useState<string>("");
-  const [analysis, setAnalysis] = useState<any>(null);
-  const [redesigns, setRedesigns] = useState<string[]>([]);
-  const [selectedRedesign, setSelectedRedesign] = useState<string>("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [progress, setProgress] = useState("");
+  const [originalImage, setOriginalImage] = useState<string | null>(null);
+  const [processedImage, setProcessedImage] = useState<string | null>(null);
+  const [extractedElements, setExtractedElements] = useState<string[] | null>(null);
+  const [analysis, setAnalysis] = useState<ProductAnalysis | null>(null);
+  const [generatedRedesigns, setRedesigns] = useState<string[] | null>(null);
+  const [stage, setStage] = useState<ProcessStage>(ProcessStage.IDLE);
+  const [error, setError] = useState<string | null>(null);
+  const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]);
+  const [designMode, setDesignMode] = useState<DesignMode>(DesignMode.NEW_CONCEPT);
+  
+  // Remix / Detail Modal State
+  const [selectedRedesignIndex, setSelectedRedesignIndex] = useState<number | null>(null);
+  const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
+  const [isRemixing, setIsRemixing] = useState(false);
 
-  // Product settings
-  const [productType, setProductType] = useState("t-shirt");
-  const [designMode, setDesignMode] = useState("modern");
-  const [customPrompt, setCustomPrompt] = useState("");
-  const [ropeType, setRopeType] = useState("default");
-  const [extraRefs, setExtraRefs] = useState<string[]>([]);
+  // Undo History State
+  const [redesignHistory, setRedesignHistory] = useState<Record<number, string[]>>({});
+
+  // API Key State - REMOVED localStorage, only show status
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+  
+  // Check for Environment Key
+  const envApiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+  const hasEnvKey = envApiKey && envApiKey.length > 10;
+  
+  // Model / Plan State
   const [useUltra, setUseUltra] = useState(false);
+  
+  // History State
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  // UI settings
-  const [viewMode, setViewMode] = useState<"grid" | "carousel">("grid");
-  const [selectedDesigns, setSelectedDesigns] = useState<number[]>([]);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // ===== HANDLERS =====
-
-  // Upload image
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 20 * 1024 * 1024) {
-      setError("File size must be less than 20MB");
-      return;
-    }
-
-    setLoading(true);
-    setError("");
-    setProgress("Uploading image...");
-
+  useEffect(() => {
     try {
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const base64 = event.target?.result as string;
-        setOriginalImage(base64);
-
-        setProgress("Removing background...");
-        const cleaned = await cleanupProductImage(base64);
-        setCleanedImage(cleaned);
-
-        setStep("analyze");
-        setProgress("");
-        setLoading(false);
-      };
-      reader.readAsDataURL(file);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
+      const savedHistory = localStorage.getItem('product_perfect_history');
+      if (savedHistory) {
+        setHistory(JSON.parse(savedHistory));
+      }
+    } catch (e) {
+      console.error("Failed to load history", e);
     }
+  }, []);
+
+  const handleSaveKeys = (free: string[], paid: string[]) => {
+    // NOTE: We no longer save to localStorage or call setKeyPools
+    // Instead, just close the modal and show info message
+    setIsApiKeyModalOpen(false);
+    setError("API Keys are now configured via Vercel Environment Variables (GEMINI_API_KEY). Please set them in your Vercel dashboard.");
   };
 
-  // Analyze product
-  const handleAnalyze = async () => {
-    if (!cleanedImage) return;
-
-    setLoading(true);
-    setError("");
-    setProgress("Analyzing product design...");
-
+  const saveHistoryToStorage = (items: HistoryItem[]) => {
     try {
-      const result = await analyzeProductDesign(
-        cleanedImage,
-        productType,
-        designMode
-      );
-
-      setAnalysis(result);
-      setStep("redesign");
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
+      localStorage.setItem('product_perfect_history', JSON.stringify(items));
+    } catch (e) {
+      console.warn("LocalStorage quota exceeded.");
+      if (items.length > 1) {
+        const reducedItems = items.slice(0, -1);
+        saveHistoryToStorage(reducedItems);
+        setHistory(reducedItems);
+      }
     }
   };
 
-  // Generate redesigns
-  const handleGenerateRedesigns = async () => {
-    if (!analysis) return;
+  const addToHistory = (
+    orig: string, 
+    proc: string | null, 
+    anal: ProductAnalysis | null, 
+    redesigns: string[] | null,
+    pType: string,
+    dMode: DesignMode,
+    rType: RopeType
+  ) => {
+    const newItem: HistoryItem = {
+      id: Date.now().toString(),
+      timestamp: Date.now(),
+      originalImage: orig,
+      processedImage: proc,
+      analysis: anal,
+      generatedRedesigns: redesigns,
+      productType: pType,
+      designMode: dMode,
+      ropeType: rType
+    };
 
-    setLoading(true);
-    setError("");
-    setProgress("Generating 6 unique redesigns...");
+    const newHistory = [newItem, ...history];
+    setHistory(newHistory);
+    saveHistoryToStorage(newHistory);
+  };
 
-    try {
-      const prompt = customPrompt || analysis.redesignPrompt;
+  const handleDeleteHistory = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newHistory = history.filter(item => item.id !== id);
+    setHistory(newHistory);
+    saveHistoryToStorage(newHistory);
+  };
 
-      const results = await generateProductRedesigns(
-        prompt,
-        ropeType,
-        extraRefs,
-        customPrompt,
-        productType,
-        useUltra
-      );
+  const handleLoadHistory = (item: HistoryItem) => {
+    setOriginalImage(item.originalImage);
+    setProcessedImage(item.processedImage);
+    setAnalysis(item.analysis);
+    setRedesigns(item.generatedRedesigns);
+    setProductType(item.productType);
+    setDesignMode(item.designMode || DesignMode.NEW_CONCEPT);
+    setStage(ProcessStage.COMPLETE);
+    setError(null);
+    setIsHistoryOpen(false);
+    setExtractedElements(null);
+    setRedesignHistory({});
+  };
 
-      setRedesigns(results);
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
+  const processFile = (file: File) => {
+    // MODIFIED: Just check if env key exists
+    if (!hasEnvKey) {
+        setError("Không tìm thấy GEMINI_API_KEY trong Vercel Environment Variables. Vui lòng cấu hình key trong Vercel dashboard.");
+        setIsApiKeyModalOpen(true);
+        return;
     }
-  };
 
-  // Remix design
-  const handleRemix = async (imageBase64: string) => {
-    const instruction = prompt("Enter remix instruction (e.g., 'make it more colorful', 'add flowers'):");
-    if (!instruction) return;
-
-    setLoading(true);
-    setError("");
-    setProgress("Remixing design...");
-
-    try {
-      const remixed = await remixProductImage(imageBase64, instruction);
-      setRedesigns([remixed, ...redesigns]);
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
-    }
-  };
-
-  // Generate mockup
-  const handleMockup = async (imageBase64: string) => {
-    setLoading(true);
-    setError("");
-    setProgress("Generating premium mockup...");
-
-    try {
-      const mockup = await generateRandomMockup(imageBase64);
-      window.open(mockup, "_blank");
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
-    }
-  };
-
-  // Split characters
-  const handleSplitCharacters = async () => {
-    if (!cleanedImage) return;
-
-    setLoading(true);
-    setError("");
-    setProgress("Detecting and splitting objects...");
-
-    try {
-      const splits = await detectAndSplitCharacters(cleanedImage);
-      setExtraRefs(splits);
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
-    }
-  };
-
-  // Extract design elements
-  const handleExtractElements = async () => {
-    if (!cleanedImage) return;
-
-    setLoading(true);
-    setError("");
-    setProgress("Extracting design elements...");
-
-    try {
-      const elements = await extractDesignElements(cleanedImage);
-      alert(`Detected elements: ${elements.join(", ")}`);
-      setProgress("");
-      setLoading(false);
-    } catch (err: any) {
-      setError(err.message);
-      setProgress("");
-      setLoading(false);
-    }
-  };
-
-  // Download image
-  const handleDownload = (imageBase64: string, filename: string) => {
-    const link = document.createElement("a");
-    link.href = imageBase64;
-    link.download = filename;
-    link.click();
-  };
-
-  // Download selected designs
-  const handleDownloadSelected = () => {
-    selectedDesigns.forEach((index) => {
-      handleDownload(redesigns[index], `redesign-${index + 1}.png`);
-    });
-    setSelectedDesigns([]);
-  };
-
-  // Toggle design selection
-  const toggleSelection = (index: number) => {
-    setSelectedDesigns((prev) =>
-      prev.includes(index)
-        ? prev.filter((i) => i !== index)
-        : [...prev, index]
-    );
-  };
-
-  // Reset app
-  const handleReset = () => {
-    setStep("upload");
-    setOriginalImage("");
-    setCleanedImage("");
+    setStage(ProcessStage.UPLOADING);
+    setError(null);
+    setProcessedImage(null);
     setAnalysis(null);
-    setRedesigns([]);
-    setSelectedDesigns([]);
-    setError("");
-    setProgress("");
+    setRedesigns(null);
+    setExtractedElements(null);
+    setRedesignHistory({});
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64 = reader.result as string;
+      setOriginalImage(base64);
+      
+      if (designMode === DesignMode.CLEAN_ONLY) {
+          startQuickClean(base64);
+      } else {
+          startAnalysis(base64);
+      }
+    };
+    reader.readAsDataURL(file);
   };
 
-  // ===== RENDER =====
+  const handleQuotaError = (err: any) => {
+     const errorMessage = err.message || err.toString();
+     
+     if (errorMessage.includes("No API Keys configured")) {
+         setError("Chưa cấu hình GEMINI_API_KEY. Vui lòng thêm key trong Vercel Environment Variables.");
+         setIsApiKeyModalOpen(true);
+         return;
+     }
+
+     const isQuotaError = errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURCE_EXHAUSTED');
+     if (isQuotaError) {
+         setError("API quota exceeded. Vui lòng kiểm tra lại GEMINI_API_KEY hoặc thêm key mới trong Vercel.");
+         setIsApiKeyModalOpen(true);
+     } else {
+         setError(errorMessage || "Failed to process.");
+     }
+  };
+
+  const startQuickClean = async (image: string) => {
+    try {
+        setStage(ProcessStage.CLEANING);
+        const cleaned = await cleanupProductImage(image);
+        setProcessedImage(cleaned);
+        setStage(ProcessStage.COMPLETE);
+    } catch (err: any) {
+        console.error(err);
+        handleQuotaError(err);
+        setStage(ProcessStage.IDLE);
+    }
+  };
+
+  const startAnalysis = async (image: string) => {
+    try {
+      setStage(ProcessStage.CLEANING); 
+      
+      const cleaned = await cleanupProductImage(image);
+      setProcessedImage(cleaned);
+      
+      setStage(ProcessStage.ANALYZING);
+      const analysisResult = await analyzeProductDesign(image, productType, designMode);
+      setAnalysis(analysisResult);
+
+      const extracted = await extractDesignElements(image);
+      setExtractedElements(extracted);
+      
+      if (analysisResult && analysisResult.redesignPrompt) {
+         setStage(ProcessStage.GENERATING);
+         
+         const redesigns = await generateProductRedesigns(
+            analysisResult.redesignPrompt, 
+            RopeType.NONE, 
+            [], 
+            "", 
+            productType,
+            useUltra 
+         );
+         
+         setRedesigns(redesigns);
+         setStage(ProcessStage.COMPLETE);
+         
+         sendDataToSheet(
+            redesigns, 
+            analysisResult.redesignPrompt, 
+            analysisResult.description || "N/A"
+         ).catch(e => console.error("Sheet logging failed silently", e));
+
+         addToHistory(
+            image, 
+            cleaned, 
+            analysisResult, 
+            redesigns, 
+            productType, 
+            designMode,
+            RopeType.NONE
+         );
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      handleQuotaError(err);
+      if (stage !== ProcessStage.COMPLETE) {
+         setStage(ProcessStage.IDLE);
+      }
+    }
+  };
+
+  const handleRedesignClick = (index: number) => {
+    setSelectedRedesignIndex(index);
+    setIsDetailModalOpen(true);
+  };
+
+  const pushToUndoHistory = (index: number, currentImage: string) => {
+      setRedesignHistory(prev => ({
+          ...prev,
+          [index]: [...(prev[index] || []), currentImage]
+      }));
+  };
+
+  const handleUndoRedesign = (index: number) => {
+      if (!generatedRedesigns) return;
+      const historyStack = redesignHistory[index];
+      if (!historyStack || historyStack.length === 0) return;
+
+      const previousImage = historyStack[historyStack.length - 1];
+      const newHistory = historyStack.slice(0, -1);
+
+      setRedesignHistory(prev => ({ ...prev, [index]: newHistory }));
+
+      const newRedesigns = [...generatedRedesigns];
+      newRedesigns[index] = previousImage;
+      setRedesigns(newRedesigns);
+  };
+
+  const handleRemix = async (instruction: string) => {
+    if (selectedRedesignIndex === null || !generatedRedesigns) return;
+    
+    setIsRemixing(true);
+    try {
+      const currentImage = generatedRedesigns[selectedRedesignIndex];
+      pushToUndoHistory(selectedRedesignIndex, currentImage);
+
+      const newImage = await remixProductImage(currentImage, instruction);
+      
+      const newRedesigns = [...generatedRedesigns];
+      newRedesigns[selectedRedesignIndex] = newImage;
+      setRedesigns(newRedesigns);
+      
+    } catch (err: any) {
+      console.error("Remix failed", err);
+      handleQuotaError(err);
+    } finally {
+      setIsRemixing(false);
+    }
+  };
+
+  const handleUpdateRedesign = (newImage: string) => {
+      if (selectedRedesignIndex === null || !generatedRedesigns) return;
+      
+      const currentImage = generatedRedesigns[selectedRedesignIndex];
+      pushToUndoHistory(selectedRedesignIndex, currentImage);
+      
+      const newRedesigns = [...generatedRedesigns];
+      newRedesigns[selectedRedesignIndex] = newImage;
+      setRedesigns(newRedesigns);
+  };
+
+  const handleRemoveBackground = async () => {
+    if (selectedRedesignIndex === null || !generatedRedesigns) return;
+    
+    setIsRemixing(true);
+    try {
+       const currentImage = generatedRedesigns[selectedRedesignIndex];
+       pushToUndoHistory(selectedRedesignIndex, currentImage);
+
+       const cleanedImage = await cleanupProductImage(currentImage);
+       
+       const newRedesigns = [...generatedRedesigns];
+       newRedesigns[selectedRedesignIndex] = cleanedImage;
+       setRedesigns(newRedesigns);
+    } catch (err: any) {
+       console.error("Background removal failed", err);
+       handleQuotaError(err);
+    } finally {
+       setIsRemixing(false);
+    }
+  };
+
+  const handleSplit = async () => {
+      if (selectedRedesignIndex === null || !generatedRedesigns) return [];
+      const currentImage = generatedRedesigns[selectedRedesignIndex];
+      return await detectAndSplitCharacters(currentImage);
+  };
+  
+  const handleGenerateMockup = async (image: string) => {
+      return await generateRandomMockup(image);
+  };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-pink-50 p-8">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-pink-600 mb-4">
-            🎨 AI Product Designer Pro
-          </h1>
-          <p className="text-gray-600 text-lg">
-            Upload → Analyze → Generate 6 Unique Redesigns
-          </p>
-          <div className="flex justify-center gap-4 mt-4">
-            <span className={`px-4 py-2 rounded-full ${step === "upload" ? "bg-purple-600 text-white" : "bg-gray-200"}`}>
-              1. Upload
-            </span>
-            <span className={`px-4 py-2 rounded-full ${step === "analyze" ? "bg-purple-600 text-white" : "bg-gray-200"}`}>
-              2. Analyze
-            </span>
-            <span className={`px-4 py-2 rounded-full ${step === "redesign" ? "bg-purple-600 text-white" : "bg-gray-200"}`}>
-              3. Redesign
-            </span>
-          </div>
-        </div>
+    <div className="min-h-screen bg-slate-950 flex flex-col relative overflow-x-hidden text-slate-200">
+      <Header onHistoryClick={() => setIsHistoryOpen(true)} />
 
-        {/* Error Display */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-6 py-4 rounded-lg mb-6 flex items-center justify-between">
-            <div>
-              <strong>Error:</strong> {error}
+      {/* API Key & Token Management Bar */}
+      <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30 relative">
+        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
+          
+          {/* Left Side: Connection Status */}
+          <div className="flex items-center text-xs text-slate-400">
+             <div className={`flex items-center px-3 py-1.5 rounded-full border ${hasEnvKey ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-red-950/30 border-red-900/50 text-red-400'}`}>
+               {hasEnvKey ? (
+                  <>
+                    <Zap size={14} className="mr-1.5 text-green-400" />
+                    <span className="font-medium">Using Vercel Environment Key</span>
+                  </>
+               ) : (
+                  <>
+                    <AlertTriangle size={14} className="mr-1.5" />
+                    <span className="font-medium">No GEMINI_API_KEY Configured</span>
+                  </>
+               )}
             </div>
-            <button
-              onClick={() => setError("")}
-              className="text-red-700 hover:text-red-900"
+            {stage === ProcessStage.GENERATING && (
+                 <span className="ml-3 text-amber-500 flex items-center animate-pulse font-bold">
+                    <RefreshCw size={10} className="mr-1 animate-spin" /> 
+                    Processing...
+                 </span>
+            )}
+          </div>
+
+          {/* Right Side: Controls */}
+          <div className="flex items-center space-x-3">
+            <button 
+              onClick={() => setIsApiKeyModalOpen(true)}
+              className="text-xs px-3 py-1.5 rounded-md font-medium transition-colors flex items-center bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700"
             >
-              ✕
+              <Key size={14} className="mr-1.5" />
+              API Key Info
             </button>
           </div>
-        )}
-
-        {/* Loading Indicator */}
-        {loading && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-2xl p-8 text-center max-w-md">
-              <div className="animate-spin w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full mx-auto mb-4"></div>
-              <p className="text-xl font-semibold">{progress || "Processing..."}</p>
-              <p className="text-gray-500 mt-2">This may take a few moments</p>
-            </div>
-          </div>
-        )}
-
-        {/* Step 1: Upload */}
-        {step === "upload" && (
-          <div className="bg-white rounded-2xl shadow-2xl p-12">
-            <div className="text-center">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                onChange={handleImageUpload}
-                className="hidden"
-              />
-              <div className="border-4 border-dashed border-purple-300 rounded-xl p-12 mb-6">
-                <div className="text-6xl mb-4">📤</div>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-12 py-6 rounded-xl text-xl font-bold hover:scale-105 transition-transform"
-                >
-                  Upload Product Image
-                </button>
-                <p className="text-gray-500 mt-4">
-                  Supports: JPG, PNG, WEBP (max 20MB)
-                </p>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4 text-left">
-                <div className="bg-purple-50 p-4 rounded-lg">
-                  <div className="text-2xl mb-2">🧹</div>
-                  <h3 className="font-bold mb-1">Auto Cleanup</h3>
-                  <p className="text-sm text-gray-600">
-                    Automatically removes background
-                  </p>
-                </div>
-                <div className="bg-blue-50 p-4 rounded-lg">
-                  <div className="text-2xl mb-2">🔍</div>
-                  <h3 className="font-bold mb-1">AI Analysis</h3>
-                  <p className="text-sm text-gray-600">
-                    Detects design elements & style
-                  </p>
-                </div>
-                <div className="bg-pink-50 p-4 rounded-lg">
-                  <div className="text-2xl mb-2">✨</div>
-                  <h3 className="font-bold mb-1">6 Variations</h3>
-                  <p className="text-sm text-gray-600">
-                    Generates unique redesigns
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Step 2: Analyze */}
-        {step === "analyze" && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-2xl shadow-2xl p-8">
-              <h2 className="text-2xl font-bold mb-6">🔍 Product Analysis</h2>
-
-              <div className="grid grid-cols-2 gap-6 mb-6">
-                {/* Original Image */}
-                <div>
-                  <h3 className="font-semibold mb-2">Original Image</h3>
-                  <img
-                    src={originalImage}
-                    alt="Original"
-                    className="w-full h-64 object-contain bg-gray-50 rounded-lg border-2 border-gray-200"
-                  />
-                </div>
-
-                {/* Cleaned Image */}
-                <div>
-                  <h3 className="font-semibold mb-2">Cleaned (No Background)</h3>
-                  <img
-                    src={cleanedImage}
-                    alt="Cleaned"
-                    className="w-full h-64 object-contain bg-gray-50 rounded-lg border-2 border-gray-200"
-                  />
-                  <button
-                    onClick={() => handleDownload(cleanedImage, "cleaned-product.png")}
-                    className="mt-2 w-full bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300"
-                  >
-                    💾 Download Cleaned Image
-                  </button>
-                </div>
-              </div>
-
-              {/* Settings */}
-              <div className="space-y-4 mb-6">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block font-semibold mb-2">Product Type</label>
-                    <select
-                      value={productType}
-                      onChange={(e) => setProductType(e.target.value)}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                    >
-                      <option value="t-shirt">👕 T-Shirt</option>
-                      <option value="mug">☕ Mug</option>
-                      <option value="poster">🖼️ Poster</option>
-                      <option value="sticker">🏷️ Sticker</option>
-                      <option value="phone-case">📱 Phone Case</option>
-                      <option value="tote-bag">👜 Tote Bag</option>
-                      <option value="hoodie">🧥 Hoodie</option>
-                      <option value="cap">🧢 Cap</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="block font-semibold mb-2">Design Mode</label>
-                    <select
-                      value={designMode}
-                      onChange={(e) => setDesignMode(e.target.value)}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500"
-                    >
-                      <option value="modern">✨ Modern & Minimal</option>
-                      <option value="vintage">🕰️ Vintage & Retro</option>
-                      <option value="bold">🔥 Bold & Vibrant</option>
-                      <option value="elegant">💎 Elegant & Luxury</option>
-                      <option value="playful">🎈 Playful & Fun</option>
-                      <option value="grunge">🎸 Grunge & Street</option>
-                      <option value="nature">🌿 Nature & Organic</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* Advanced Settings */}
-                <div>
-                  <button
-                    onClick={() => setShowAdvanced(!showAdvanced)}
-                    className="text-purple-600 font-semibold hover:text-purple-700"
-                  >
-                    {showAdvanced ? "▼" : "▶"} Advanced Options
-                  </button>
-
-                  {showAdvanced && (
-                    <div className="mt-4 space-y-4 p-4 bg-gray-50 rounded-lg">
-                      <div className="flex items-center gap-4">
-                        <label className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={useUltra}
-                            onChange={(e) => setUseUltra(e.target.checked)}
-                            className="w-4 h-4"
-                          />
-                          <span>Use Ultra Quality (slower)</span>
-                        </label>
-                      </div>
-
-                      <div>
-                        <label className="block font-semibold mb-2">Rope Type</label>
-                        <select
-                          value={ropeType}
-                          onChange={(e) => setRopeType(e.target.value)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-lg"
-                        >
-                          <option value="default">Default</option>
-                          <option value="smooth">Smooth</option>
-                          <option value="textured">Textured</option>
-                        </select>
-                      </div>
-
-                      <div>
-                        <button
-                          onClick={handleSplitCharacters}
-                          disabled={loading}
-                          className="w-full bg-blue-100 text-blue-700 px-4 py-3 rounded-lg hover:bg-blue-200 disabled:opacity-50"
-                        >
-                          🔍 Detect & Split Objects
-                        </button>
-                      </div>
-
-                      <div>
-                        <button
-                          onClick={handleExtractElements}
-                          disabled={loading}
-                          className="w-full bg-green-100 text-green-700 px-4 py-3 rounded-lg hover:bg-green-200 disabled:opacity-50"
-                        >
-                          🎨 Extract Design Elements
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex gap-4">
-                <button
-                  onClick={handleAnalyze}
-                  disabled={loading}
-                  className="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 text-white px-8 py-4 rounded-xl text-lg font-bold hover:scale-105 transition-transform disabled:opacity-50"
-                >
-                  🚀 Analyze & Continue
-                </button>
-                <button
-                  onClick={handleReset}
-                  className="bg-gray-200 text-gray-800 px-6 py-4 rounded-xl font-semibold hover:bg-gray-300"
-                >
-                  🔄 Start Over
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Step 3: Redesign */}
-        {step === "redesign" && (
-          <div className="space-y-6">
-            {/* Analysis Results */}
-            {analysis && (
-              <div className="bg-white rounded-2xl shadow-2xl p-8">
-                <h2 className="text-2xl font-bold mb-4">📊 Analysis Results</h2>
-                <div className="grid grid-cols-2 gap-6 mb-6">
-                  <div>
-                    <h3 className="font-semibold text-lg mb-2">{analysis.title}</h3>
-                    <p className="text-gray-600 mb-4">{analysis.description}</p>
-                    <div className="space-y-2">
-                      <div>
-                        <span className="font-semibold">Detected Type:</span>{" "}
-                        <span className="text-purple-600">{analysis.detectedType}</span>
-                      </div>
-                      <div>
-                        <span className="font-semibold">Strategy:</span>{" "}
-                        <span className="text-blue-600">{analysis.strategy}</span>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2 mt-4">
-                      {analysis.detectedComponents?.map((comp: string, i: number) => (
-                        <span
-                          key={i}
-                          className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
-                        >
-                          {comp}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <img
-                      src={cleanedImage}
-                      alt="Product"
-                      className="w-full h-64 object-contain bg-gray-50 rounded-lg border-2 border-gray-200"
-                    />
-                  </div>
-                </div>
-
-                {/* Custom Prompt */}
-                <div className="mb-6">
-                  <label className="block font-semibold mb-2">
-                    Custom Prompt (Optional)
-                  </label>
-                  <textarea
-                    value={customPrompt}
-                    onChange={(e) => setCustomPrompt(e.target.value)}
-                    placeholder={analysis.redesignPrompt || "Enter custom instructions..."}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg h-24 focus:ring-2 focus:ring-purple-500"
-                  />
-                  <p className="text-sm text-gray-500 mt-1">
-                    Leave empty to use AI-generated prompt
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleGenerateRedesigns}
-                  disabled={loading}
-                  className="w-full bg-gradient-to-r from-pink-600 to-purple-600 text-white px-8 py-4 rounded-xl text-lg font-bold hover:scale-105 transition-transform disabled:opacity-50"
-                >
-                  ✨ Generate 6 Unique Redesigns
-                </button>
-              </div>
-            )}
-
-            {/* Redesign Results */}
-            {redesigns.length > 0 && (
-              <div className="bg-white rounded-2xl shadow-2xl p-8">
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold">
-                    🎨 Generated Redesigns ({redesigns.length})
-                  </h2>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setViewMode("grid")}
-                      className={`px-4 py-2 rounded-lg ${
-                        viewMode === "grid"
-                          ? "bg-purple-600 text-white"
-                          : "bg-gray-200 text-gray-800"
-                      }`}
-                    >
-                      Grid
-                    </button>
-                    <button
-                      onClick={() => setViewMode("carousel")}
-                      className={`px-4 py-2 rounded-lg ${
-                        viewMode === "carousel"
-                          ? "bg-purple-600 text-white"
-                          : "bg-gray-200 text-gray-800"
-                      }`}
-                    >
-                      Carousel
-                    </button>
-                  </div>
-                </div>
-
-                {selectedDesigns.length > 0 && (
-                  <div className="mb-4 flex items-center justify-between bg-purple-50 p-4 rounded-lg">
-                    <span className="font-semibold">
-                      {selectedDesigns.length} design(s) selected
-                    </span>
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleDownloadSelected}
-                        className="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700"
-                      >
-                        💾 Download Selected
-                      </button>
-                      <button
-                        onClick={() => setSelectedDesigns([])}
-                        className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-300"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className={viewMode === "grid" ? "grid grid-cols-3 gap-6" : "space-y-4"}>
-                  {redesigns.map((img, i) => (
-                    <div
-                      key={i}
-                      className={`relative group bg-gray-50 rounded-lg overflow-hidden ${
-                        selectedDesigns.includes(i) ? "ring-4 ring-purple-600" : ""
-                      }`}
-                    >
-                      <img
-                        src={img}
-                        alt={`Redesign ${i + 1}`}
-                        className="w-full h-64 object-contain cursor-pointer"
-                        onClick={() => toggleSelection(i)}
-                      />
-                      <div className="absolute top-2 right-2">
-                        <input
-                          type="checkbox"
-                          checked={selectedDesigns.includes(i)}
-                          onChange={() => toggleSelection(i)}
-                          className="w-5 h-5"
-                        />
-                      </div>
-                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 flex-wrap p-4">
-                        <button
-                          onClick={() => handleDownload(img, `redesign-${i + 1}.png`)}
-                          className="bg-white text-gray-800 px-3 py-2 rounded-lg font-semibold hover:bg-gray-100 text-sm"
-                        >
-                          💾 Download
-                        </button>
-                        <button
-                          onClick={() => handleRemix(img)}
-                          className="bg-purple-600 text-white px-3 py-2 rounded-lg font-semibold hover:bg-purple-700 text-sm"
-                        >
-                          🔄 Remix
-                        </button>
-                        <button
-                          onClick={() => handleMockup(img)}
-                          className="bg-blue-600 text-white px-3 py-2 rounded-lg font-semibold hover:bg-blue-700 text-sm"
-                        >
-                          📸 Mockup
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Action Buttons */}
-            <div className="flex gap-4">
-              <button
-                onClick={handleGenerateRedesigns}
-                disabled={loading}
-                className="flex-1 bg-gradient-to-r from-purple-600 to-pink-600 text-white px-8 py-4 rounded-xl text-lg font-bold hover:scale-105 transition-transform disabled:opacity-50"
-              >
-                ✨ Generate More Redesigns
-              </button>
-              <button
-                onClick={handleReset}
-                className="bg-gray-200 text-gray-800 px-8 py-4 rounded-xl font-semibold hover:bg-gray-300"
-              >
-                🔄 Start Over
-              </button>
-            </div>
-          </div>
-        )}
+        </div>
       </div>
+
+      <main className="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full z-10">
+        
+        {stage === ProcessStage.IDLE && (
+           <div className="mb-8 space-y-6">
+              <div className="text-center mb-8">
+                  <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
+                     Reimagine Your Products
+                  </h2>
+                  <p className="text-slate-500">Upload an image to clean, analyze, and generate stunning redesigns instantly.</p>
+              </div>
+
+              {/* Controls Container */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg">
+                 
+                 {/* Design Mode Selector */}
+                 <div className="flex flex-col">
+                    <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
+                        <Wand2 className="w-3 h-3 mr-1 text-purple-400" />
+                        Design Goal
+                    </label>
+                    <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
+                        <button 
+                            onClick={() => setDesignMode(DesignMode.NEW_CONCEPT)}
+                            className={`flex-1 py-2 text-xs font-medium rounded-md transition-all flex items-center justify-center ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                        >
+                            <Sparkles size={12} className="mr-1.5" />
+                            New Concept
+                        </button>
+                        <button 
+                            onClick={() => setDesignMode(DesignMode.ENHANCE_EXISTING)}
+                            className={`flex-1 py-2 text-xs font-medium rounded-md transition-all flex items-center justify-center ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+                        >
+                            <Paintbrush size={12} className="mr-1.5" />
+                            Enhance Existing
+                        </button>
+                    </div>
+                 </div>
+
+                 {/* Product Type Selector */}
+                 <div className="flex flex-col">
+                    <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
+                        <Package className="w-3 h-3 mr-1 text-blue-400" />
+                        Product Type
+                    </label>
+                    <select
+                        value={productType}
+                        onChange={(e) => setProductType(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-sm rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                    >
+                        {PRODUCT_TYPES.map(type => (
+                            <option key={type} value={type}>{type}</option>
+                        ))}
+                    </select>
+                 </div>
+              </div>
+           </div>
+        )}
+
+        {/* Quick Actions */}
+        {stage === ProcessStage.IDLE && (
+            <div className="flex justify-center mb-6">
+                <button
+                   onClick={() => setDesignMode(DesignMode.CLEAN_ONLY)}
+                   className={`flex items-center px-4 py-2 rounded-full text-xs font-bold transition-all border ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                >
+                   <Eraser size={14} className="mr-1.5" />
+                   Quick Tool: Remove Background Only
+                </button>
+            </div>
+        )}
+
+        {stage === ProcessStage.IDLE ? (
+          <div className="max-w-2xl mx-auto">
+            <FileUpload onFileSelect={processFile} />
+          </div>
+        ) : (
+          <>
+            {error && (
+              <div className="mb-6 bg-red-950/30 border border-red-900/50 text-red-200 p-4 rounded-xl flex items-center shadow-lg animate-fade-in">
+                <AlertCircle className="w-5 h-5 mr-3 flex-shrink-0 text-red-500" />
+                <span className="text-sm font-medium">{error}</span>
+                <button 
+                    onClick={() => setStage(ProcessStage.IDLE)} 
+                    className="ml-auto text-xs bg-red-900/50 hover:bg-red-800 px-3 py-1.5 rounded-lg transition-colors border border-red-800"
+                >
+                    Try Again
+                </button>
+              </div>
+            )}
+
+            <ResultsPanel
+              originalImage={originalImage || ''}
+              processedImage={processedImage}
+              analysis={analysis}
+              generatedRedesigns={generatedRedesigns}
+              stage={stage}
+              onImageClick={handleRedesignClick}
+            />
+
+            {stage === ProcessStage.COMPLETE && (
+               <div className="mt-8 flex justify-center">
+                  <button
+                    onClick={() => {
+                        setStage(ProcessStage.IDLE);
+                        setOriginalImage(null);
+                        setProcessedImage(null);
+                        setRedesigns(null);
+                    }}
+                    className="flex items-center px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full font-bold shadow-lg transition-all border border-slate-700 hover:border-indigo-500"
+                  >
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                    Start New Design
+                  </button>
+               </div>
+            )}
+          </>
+        )}
+      </main>
+
+      <HistorySidebar
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        history={history}
+        onSelect={handleLoadHistory}
+        onDelete={handleDeleteHistory}
+      />
+
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        onClose={() => setIsApiKeyModalOpen(false)}
+        onSave={handleSaveKeys}
+      />
+
+      {generatedRedesigns && selectedRedesignIndex !== null && (
+        <RedesignDetailModal
+          isOpen={isDetailModalOpen}
+          onClose={() => setIsDetailModalOpen(false)}
+          imageUrl={generatedRedesigns[selectedRedesignIndex]}
+          onRemix={handleRemix}
+          onRemoveBackground={handleRemoveBackground}
+          onSplit={handleSplit}
+          onGenerateMockup={handleGenerateMockup}
+          onUpdateImage={handleUpdateRedesign}
+          isRemixing={isRemixing}
+          onUndo={() => handleUndoRedesign(selectedRedesignIndex!)}
+          canUndo={(redesignHistory[selectedRedesignIndex!]?.length || 0) > 0}
+        />
+      )}
     </div>
   );
 }
