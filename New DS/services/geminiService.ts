@@ -12,9 +12,31 @@ export const cleanJsonString = (text: string) => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- API KEY MANAGEMENT (PAID BILLING) ---
+const API_KEYS = [
+  "AIzaSyABqklwZahC-ixZ4vvQ28Gjl6Np4Q7qdwc",
+  "AIzaSyDXSPV_UcVjG4u03-197gcym3h9bavO20Q",
+  "AIzaSyBIuCGUzbmAQHQejpByAq1SZI6wOu9U7HM"
+];
+
+let currentKeyIndex = 0;
+
+const getNextKey = () => {
+  const key = API_KEYS[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+  // console.log(`Using API Key [${currentKeyIndex}]: ...${key.slice(-4)}`);
+  return key;
+};
+
+// Initialize AI client with rotated key
+const getAiClient = () => {
+  const apiKey = getNextKey();
+  return new GoogleGenAI({ apiKey });
+};
+
 // Robust retry logic for API calls
-// Increased default retries to 5 and initialDelay to 10s to handle "Quota exceeded... retry in 5.36s" errors reliably
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, initialDelay = 10000): Promise<T> {
+// Reduced delays significantly since we are using Paid Keys
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 1000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
@@ -31,13 +53,12 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, ini
                 throw new Error("AI Model not found or deprecated. Please check configuration.");
             }
 
-            // Also retry on 503 (Service Unavailable) or 500 (Internal Error) which can be transient
             const isServerTransient = error?.status === 503 || error?.status === 500;
 
             if ((isRateLimit || isServerTransient) && i < retries - 1) {
-                console.warn(`Rate limit/Transient error hit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
+                console.warn(`Transient error. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
                 await sleep(currentDelay);
-                currentDelay *= 2; // Exponential backoff (10s -> 20s -> 40s -> 80s)
+                currentDelay *= 2; 
                 continue;
             }
 
@@ -46,15 +67,6 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, ini
     }
     throw new Error("Operation failed after max retries");
 }
-
-// Initialize AI client with environment variable
-const getAiClient = () => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) {
-    throw new Error("API_KEY environment variable is not set. Please configure it in your Vercel project settings.");
-  }
-  return new GoogleGenAI({ apiKey });
-};
 
 // --- EXPORTED SERVICES ---
 
@@ -183,8 +195,8 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
         });
         if (img) results.push(img);
         
-        // Significantly increased delay to 7000ms to avoid 429 on Vercel/Free tier
-        await sleep(7000); 
+        // Minimal delay for Paid Keys
+        await sleep(500); 
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -229,11 +241,10 @@ export const generateProductRedesigns = async (
 
 
     const results: string[] = [];
-    // Generate 6 images sequentially to handle rate limits
+    // Generate 6 images sequentially (Paid keys are fast enough)
     for(let i=0; i<6; i++) {
-        // High delay (10s) before each generation (including the first one, to buffer from previous steps)
-        // This ensures we stay well below 15 RPM (1 request every 4s)
-        await sleep(10000); 
+        // Minimal buffer for stability
+        await sleep(500); 
         
         try {
             const img = await executeWithRetry(async () => {
@@ -306,9 +317,9 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
 
         const isolatedImages: string[] = [];
         
-        // Sequential generation with high safety delay
+        // Fast sequence for Paid keys
         for (const charName of characterList.slice(0, 4)) {
-             await sleep(7000); // Increased wait
+             await sleep(500); 
              try {
                  const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
                  const resp = await ai.models.generateContent({
