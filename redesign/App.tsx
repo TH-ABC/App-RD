@@ -5,10 +5,40 @@ import { ResultsPanel } from './components/ResultsPanel';
 import { HistorySidebar } from './components/HistorySidebar';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { RedesignDetailModal } from './components/RedesignDetailModal';
-import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, setKeyPools, detectAndSplitCharacters, generateRandomMockup } from './services/geminiService';
+
+import {
+  cleanupProductImage,
+  analyzeProductDesign,
+  generateProductRedesigns,
+  extractDesignElements,
+  remixProductImage,
+  detectAndSplitCharacters,
+  generateRandomMockup
+} from './services/geminiService';
+
 import { sendDataToSheet } from './services/googleSheetService';
-import { ProductAnalysis, ProcessStage, PRODUCT_TYPES, HistoryItem, DesignMode, RopeType } from './types';
-import { AlertCircle, RefreshCw, Key, Layers, Eraser, Sparkles, Zap, Package, Wand2, Paintbrush, AlertTriangle } from 'lucide-react';
+import {
+  ProductAnalysis,
+  ProcessStage,
+  PRODUCT_TYPES,
+  HistoryItem,
+  DesignMode,
+  RopeType
+} from './types';
+
+import {
+  AlertCircle,
+  RefreshCw,
+  Key,
+  Layers,
+  Eraser,
+  Sparkles,
+  Zap,
+  Package,
+  Wand2,
+  Paintbrush,
+  AlertTriangle
+} from 'lucide-react';
 
 function App() {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -18,92 +48,91 @@ function App() {
   const [generatedRedesigns, setRedesigns] = useState<string[] | null>(null);
   const [stage, setStage] = useState<ProcessStage>(ProcessStage.IDLE);
   const [error, setError] = useState<string | null>(null);
-  const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]); // Defaults to Auto-Detect
+
+  const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]);
   const [designMode, setDesignMode] = useState<DesignMode>(DesignMode.NEW_CONCEPT);
-  
-  // Remix / Detail Modal State
+
   const [selectedRedesignIndex, setSelectedRedesignIndex] = useState<number | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
   const [isRemixing, setIsRemixing] = useState(false);
-
-  // Undo History State: Map index -> array of previous image strings
   const [redesignHistory, setRedesignHistory] = useState<Record<number, string[]>>({});
 
-  // API Key State
   const [freeKeysCount, setFreeKeysCount] = useState(0);
   const [paidKeysCount, setPaidKeysCount] = useState(0);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
-  
-  // Check for Environment Key (support both standard and custom env var)
+
+  // Only UI — backend no longer uses env keys
   const envApiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
   const hasEnvKey = envApiKey && envApiKey.length > 10;
-  
-  // Model / Plan State (Used mostly for UI indication now)
   const [useUltra, setUseUltra] = useState(false);
-  
-  // History State
+
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
+  /* ----------------------------------------------------------
+     LOAD LOCAL KEY POOL (UI ONLY)
+     Dạng B KHÔNG dùng key pool nữa, nhưng vẫn giữ UI
+  ----------------------------------------------------------- */
   useEffect(() => {
-    // Load Key Pools from local storage
     const storedFree = localStorage.getItem('gemini_pool_free');
     const storedPaid = localStorage.getItem('gemini_pool_paid');
-    
+
     const free = storedFree ? JSON.parse(storedFree) : [];
     const paid = storedPaid ? JSON.parse(storedPaid) : [];
 
-    if (free.length > 0 || paid.length > 0) {
-       setFreeKeysCount(free.length);
-       setPaidKeysCount(paid.length);
-       setKeyPools(free, paid);
-       
-       if (paid.length > 0) setUseUltra(true);
-    }
+    setFreeKeysCount(free.length);
+    setPaidKeysCount(paid.length);
+
+    if (paid.length > 0) setUseUltra(true);
   }, []);
 
+  /* ----------------------------------------------------------
+     LOAD HISTORY
+  ----------------------------------------------------------- */
   useEffect(() => {
     try {
       const savedHistory = localStorage.getItem('product_perfect_history');
-      if (savedHistory) {
-        setHistory(JSON.parse(savedHistory));
-      }
+      if (savedHistory) setHistory(JSON.parse(savedHistory));
     } catch (e) {
       console.error("Failed to load history", e);
     }
   }, []);
 
+  /* ----------------------------------------------------------
+     SAVE API KEYS (UI ONLY)
+  ----------------------------------------------------------- */
   const handleSaveKeys = (free: string[], paid: string[]) => {
     localStorage.setItem('gemini_pool_free', JSON.stringify(free));
     localStorage.setItem('gemini_pool_paid', JSON.stringify(paid));
-    
+
     setFreeKeysCount(free.length);
     setPaidKeysCount(paid.length);
-    setKeyPools(free, paid);
-    
+
     if (paid.length > 0) setUseUltra(true);
 
     setIsApiKeyModalOpen(false);
     setError(null);
   };
 
+  /* ----------------------------------------------------------
+     HISTORY HELPERS
+  ----------------------------------------------------------- */
   const saveHistoryToStorage = (items: HistoryItem[]) => {
     try {
       localStorage.setItem('product_perfect_history', JSON.stringify(items));
-    } catch (e) {
-      console.warn("LocalStorage quota exceeded.");
+    } catch {
       if (items.length > 1) {
-        const reducedItems = items.slice(0, -1);
-        saveHistoryToStorage(reducedItems);
-        setHistory(reducedItems);
+        const reduced = items.slice(0, -1);
+        saveHistoryToStorage(reduced);
+        setHistory(reduced);
       }
     }
   };
 
   const addToHistory = (
-    orig: string, 
-    proc: string | null, 
-    anal: ProductAnalysis | null, 
+    orig: string,
+    proc: string | null,
+    anal: ProductAnalysis | null,
     redesigns: string[] | null,
     pType: string,
     dMode: DesignMode,
@@ -144,17 +173,19 @@ function App() {
     setError(null);
     setIsHistoryOpen(false);
     setExtractedElements(null);
-    setRedesignHistory({}); // Reset undo history for loaded item
+    setRedesignHistory({});
   };
 
   const hasKeys = freeKeysCount > 0 || paidKeysCount > 0;
 
+  /* ----------------------------------------------------------
+     FILE SELECT → PROCESSING
+  ----------------------------------------------------------- */
   const processFile = (file: File) => {
-    // Critical Check: If no user keys AND no system key, stop immediately
     if (!hasKeys && !hasEnvKey) {
-        setError("Không tìm thấy API Key hệ thống. Vui lòng nhập API Key của bạn để bắt đầu.");
-        setIsApiKeyModalOpen(true);
-        return;
+      setError("Không tìm thấy API Key hệ thống. Vui lòng nhập API Key.");
+      setIsApiKeyModalOpen(true);
+      return;
     }
 
     setStage(ProcessStage.UPLOADING);
@@ -163,353 +194,331 @@ function App() {
     setAnalysis(null);
     setRedesigns(null);
     setExtractedElements(null);
-    setRedesignHistory({}); // Reset undo history
+    setRedesignHistory({});
 
     const reader = new FileReader();
     reader.onloadend = () => {
       const base64 = reader.result as string;
       setOriginalImage(base64);
-      
-      // Start processing based on current mode
+
       if (designMode === DesignMode.CLEAN_ONLY) {
-          startQuickClean(base64);
+        startQuickClean(base64);
       } else {
-          startAnalysis(base64);
+        startAnalysis(base64);
       }
     };
     reader.readAsDataURL(file);
   };
 
   const handleQuotaError = (err: any) => {
-     const errorMessage = err.message || err.toString();
-     // Check for missing keys explicitly
-     if (errorMessage.includes("No API Keys configured")) {
-         setError("Chưa cấu hình API Key. Vui lòng thêm Key để sử dụng.");
-         setIsApiKeyModalOpen(true);
-         return;
-     }
-
-     const isQuotaError = errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('RESOURSE_EXHAUSTED');
-     if (isQuotaError && !hasKeys) {
-         setError("Dung lượng miễn phí mặc định đã hết hoặc bị giới hạn. Vui lòng thêm API Key riêng.");
-         setIsApiKeyModalOpen(true);
-     } else {
-         setError(errorMessage || "Failed to process.");
-     }
+    const msg = err.message || err.toString();
+    if (msg.includes("No API Keys configured")) {
+      setError("Chưa cấu hình API Key.");
+      setIsApiKeyModalOpen(true);
+      return;
+    }
+    if (msg.includes("429") || msg.includes("quota")) {
+      if (!hasKeys)
+        setError("Dung lượng miễn phí hết. Vui lòng thêm API key.");
+      else setError(msg);
+      return;
+    }
+    setError(msg);
   };
 
+  /* ----------------------------------------------------------
+     QUICK CLEAN
+  ----------------------------------------------------------- */
   const startQuickClean = async (image: string) => {
     try {
-        setStage(ProcessStage.CLEANING);
-        const cleaned = await cleanupProductImage(image);
-        setProcessedImage(cleaned);
-        setStage(ProcessStage.COMPLETE);
-    } catch (err: any) {
-        console.error(err);
-        handleQuotaError(err);
-        setStage(ProcessStage.IDLE);
+      setStage(ProcessStage.CLEANING);
+      const cleaned = await cleanupProductImage(image);
+      setProcessedImage(cleaned);
+      setStage(ProcessStage.COMPLETE);
+    } catch (err) {
+      handleQuotaError(err);
+      setStage(ProcessStage.IDLE);
     }
   };
 
+  /* ----------------------------------------------------------
+     FULL PIPELINE
+  ----------------------------------------------------------- */
   const startAnalysis = async (image: string) => {
     try {
-      setStage(ProcessStage.CLEANING); 
-      
-      // 1. Clean
+      setStage(ProcessStage.CLEANING);
+
       const cleaned = await cleanupProductImage(image);
       setProcessedImage(cleaned);
-      
-      // 2. Analyze
+
       setStage(ProcessStage.ANALYZING);
       const analysisResult = await analyzeProductDesign(image, productType, designMode);
       setAnalysis(analysisResult);
 
-      // 3. Extract
       const extracted = await extractDesignElements(image);
       setExtractedElements(extracted);
-      
-      // 4. Generate
-      if (analysisResult && analysisResult.redesignPrompt) {
-         setStage(ProcessStage.GENERATING);
-         
-         const redesigns = await generateProductRedesigns(
-            analysisResult.redesignPrompt, 
-            RopeType.NONE, 
-            [], 
-            "", 
-            productType,
-            useUltra 
-         );
-         
-         setRedesigns(redesigns);
-         setStage(ProcessStage.COMPLETE);
-         
-         // 5. Send to Google Sheet (Hidden Background Process)
-         sendDataToSheet(
-            redesigns, 
-            analysisResult.redesignPrompt, 
-            analysisResult.description || "N/A"
-         ).catch(e => console.error("Sheet logging failed silently", e));
 
-         addToHistory(
-            image, 
-            cleaned, 
-            analysisResult, 
-            redesigns, 
-            productType, 
-            designMode,
-            RopeType.NONE
-         );
+      if (analysisResult?.redesignPrompt) {
+        setStage(ProcessStage.GENERATING);
+
+        const redesigns = await generateProductRedesigns(
+          analysisResult.redesignPrompt,
+          RopeType.NONE,
+          [],
+          "",
+          productType,
+          useUltra
+        );
+
+        setRedesigns(redesigns);
+        setStage(ProcessStage.COMPLETE);
+
+        sendDataToSheet(
+          redesigns,
+          analysisResult.redesignPrompt,
+          analysisResult.description || "N/A"
+        ).catch(() => {});
+
+        addToHistory(
+          image,
+          cleaned,
+          analysisResult,
+          redesigns,
+          productType,
+          designMode,
+          RopeType.NONE
+        );
       }
 
-    } catch (err: any) {
-      console.error(err);
+    } catch (err) {
       handleQuotaError(err);
-      if (stage !== ProcessStage.COMPLETE) {
-         setStage(ProcessStage.IDLE);
-      }
+      if (stage !== ProcessStage.COMPLETE) setStage(ProcessStage.IDLE);
     }
   };
 
+  /* ----------------------------------------------------------
+     REDESIGN MODAL HANDLERS
+  ----------------------------------------------------------- */
   const handleRedesignClick = (index: number) => {
     setSelectedRedesignIndex(index);
     setIsDetailModalOpen(true);
   };
 
-  const pushToUndoHistory = (index: number, currentImage: string) => {
-      setRedesignHistory(prev => ({
-          ...prev,
-          [index]: [...(prev[index] || []), currentImage]
-      }));
+  const pushUndo = (index: number, current: string) => {
+    setRedesignHistory(prev => ({
+      ...prev,
+      [index]: [...(prev[index] || []), current]
+    }));
   };
 
   const handleUndoRedesign = (index: number) => {
-      if (!generatedRedesigns) return;
-      const historyStack = redesignHistory[index];
-      if (!historyStack || historyStack.length === 0) return;
+    if (!generatedRedesigns) return;
+    const stack = redesignHistory[index];
+    if (!stack?.length) return;
 
-      const previousImage = historyStack[historyStack.length - 1];
-      const newHistory = historyStack.slice(0, -1);
+    const previous = stack[stack.length - 1];
+    const newStack = stack.slice(0, -1);
 
-      setRedesignHistory(prev => ({ ...prev, [index]: newHistory }));
+    setRedesignHistory(prev => ({ ...prev, [index]: newStack }));
 
-      const newRedesigns = [...generatedRedesigns];
-      newRedesigns[index] = previousImage;
-      setRedesigns(newRedesigns);
+    const newList = [...generatedRedesigns];
+    newList[index] = previous;
+    setRedesigns(newList);
   };
 
   const handleRemix = async (instruction: string) => {
-    if (selectedRedesignIndex === null || !generatedRedesigns) return;
-    
+    if (selectedRedesignIndex == null || !generatedRedesigns) return;
+
     setIsRemixing(true);
     try {
-      const currentImage = generatedRedesigns[selectedRedesignIndex];
-      
-      // Save state before changing
-      pushToUndoHistory(selectedRedesignIndex, currentImage);
+      const current = generatedRedesigns[selectedRedesignIndex];
+      pushUndo(selectedRedesignIndex, current);
 
-      const newImage = await remixProductImage(currentImage, instruction);
-      
-      const newRedesigns = [...generatedRedesigns];
-      newRedesigns[selectedRedesignIndex] = newImage;
-      setRedesigns(newRedesigns);
-      
-    } catch (err: any) {
-      console.error("Remix failed", err);
+      const newImage = await remixProductImage(current, instruction);
+
+      const updated = [...generatedRedesigns];
+      updated[selectedRedesignIndex] = newImage;
+      setRedesigns(updated);
+
+    } catch (err) {
       handleQuotaError(err);
-      // Revert history on fail (optional, but cleaner)
     } finally {
       setIsRemixing(false);
     }
   };
 
-  // Helper to directly update image from Modal (e.g., Applying Mockup)
-  const handleUpdateRedesign = (newImage: string) => {
-      if (selectedRedesignIndex === null || !generatedRedesigns) return;
-      
-      const currentImage = generatedRedesigns[selectedRedesignIndex];
-      pushToUndoHistory(selectedRedesignIndex, currentImage);
-      
-      const newRedesigns = [...generatedRedesigns];
-      newRedesigns[selectedRedesignIndex] = newImage;
-      setRedesigns(newRedesigns);
+  const handleUpdateRedesign = (newImg: string) => {
+    if (selectedRedesignIndex == null || !generatedRedesigns) return;
+
+    const current = generatedRedesigns[selectedRedesignIndex];
+    pushUndo(selectedRedesignIndex, current);
+
+    const updated = [...generatedRedesigns];
+    updated[selectedRedesignIndex] = newImg;
+    setRedesigns(updated);
   };
 
-  // New handler for Remove Background
   const handleRemoveBackground = async () => {
-    if (selectedRedesignIndex === null || !generatedRedesigns) return;
-    
+    if (selectedRedesignIndex == null || !generatedRedesigns) return;
+
     setIsRemixing(true);
     try {
-       const currentImage = generatedRedesigns[selectedRedesignIndex];
-       
-       // Save state before changing
-       pushToUndoHistory(selectedRedesignIndex, currentImage);
+      const current = generatedRedesigns[selectedRedesignIndex];
+      pushUndo(selectedRedesignIndex, current);
 
-       // Reuse the cleanup service which removes bg
-       const cleanedImage = await cleanupProductImage(currentImage);
-       
-       const newRedesigns = [...generatedRedesigns];
-       newRedesigns[selectedRedesignIndex] = cleanedImage;
-       setRedesigns(newRedesigns);
-    } catch (err: any) {
-       console.error("Background removal failed", err);
-       handleQuotaError(err);
+      const cleanedImage = await cleanupProductImage(current);
+
+      const updated = [...generatedRedesigns];
+      updated[selectedRedesignIndex] = cleanedImage;
+      setRedesigns(updated);
+    } catch (err) {
+      handleQuotaError(err);
     } finally {
-       setIsRemixing(false);
+      setIsRemixing(false);
     }
   };
 
   const handleSplit = async () => {
-      if (selectedRedesignIndex === null || !generatedRedesigns) return [];
-      const currentImage = generatedRedesigns[selectedRedesignIndex];
-      return await detectAndSplitCharacters(currentImage);
+    if (selectedRedesignIndex == null || !generatedRedesigns) return [];
+    return detectAndSplitCharacters(generatedRedesigns[selectedRedesignIndex]);
   };
-  
+
   const handleGenerateMockup = async (image: string) => {
-      return await generateRandomMockup(image);
+    return generateRandomMockup(image);
   };
+
+  /* ----------------------------------------------------------
+     UI RENDER
+  ----------------------------------------------------------- */
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col relative overflow-x-hidden text-slate-200">
       <Header onHistoryClick={() => setIsHistoryOpen(true)} />
 
-      {/* API Key & Token Management Bar */}
-      <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30 relative">
+      {/* Top Bar */}
+      <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-          
-          {/* Left Side: Connection Status */}
+
+          {/* Connection Indicator */}
           <div className="flex items-center text-xs text-slate-400">
-             {hasKeys ? (
-                <div className="flex items-center space-x-2">
-                    <div className="flex items-center bg-indigo-900/30 text-indigo-300 px-3 py-1.5 rounded-full border border-indigo-800">
-                        <Layers className="w-3.5 h-3.5 mr-1.5" />
-                        <span className="mr-1 font-medium">Pool:</span> 
-                        <span>{freeKeysCount} Free, {paidKeysCount} Paid</span>
-                    </div>
-                    {stage === ProcessStage.GENERATING && (
-                         <span className="text-amber-500 flex items-center animate-pulse font-bold">
-                            <RefreshCw size={10} className="mr-1 animate-spin" /> 
-                            Rotating Keys...
-                         </span>
-                    )}
+            {(freeKeysCount > 0 || paidKeysCount > 0) ? (
+              <div className="flex items-center space-x-2">
+                <div className="flex items-center bg-indigo-900/30 text-indigo-300 px-3 py-1.5 rounded-full border border-indigo-800">
+                  <Layers className="w-3.5 h-3.5 mr-1.5" />
+                  <span className="mr-1 font-medium">Pool:</span>
+                  <span>{freeKeysCount} Free, {paidKeysCount} Paid</span>
                 </div>
-             ) : (
-                <div className={`flex items-center px-3 py-1.5 rounded-full border ${hasEnvKey ? 'bg-slate-800 border-slate-700 text-slate-500' : 'bg-red-950/30 border-red-900/50 text-red-400'}`}>
-                   {hasEnvKey ? (
-                      <>
-                        <Zap size={14} className="mr-1.5 text-blue-400" />
-                        <span className="font-medium">Using Default Free Quota</span>
-                      </>
-                   ) : (
-                      <>
-                        <AlertTriangle size={14} className="mr-1.5" />
-                        <span className="font-medium">No Default Key Configured</span>
-                      </>
-                   )}
-                </div>
-             )}
+              </div>
+            ) : (
+              <div className={`flex items-center px-3 py-1.5 rounded-full border ${hasEnvKey ? 'bg-slate-800 text-slate-500 border-slate-700' : 'bg-red-950/30 text-red-400 border-red-900/50'}`}>
+                {hasEnvKey ? (
+                  <>
+                    <Zap className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
+                    <span>Using Default Free Quota</span>
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5 mr-1.5" />
+                    <span>No Default Key</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Right Side: Controls */}
-          <div className="flex items-center space-x-3">
-            <button 
-              onClick={() => setIsApiKeyModalOpen(true)}
-              className={`text-xs px-3 py-1.5 rounded-md font-medium transition-colors flex items-center ${!hasKeys ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-md shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700'}`}
-            >
-              <Key size={14} className="mr-1.5" />
-              {hasKeys ? 'Manage Keys' : 'Connect API Keys'}
-            </button>
-          </div>
+          <button
+            onClick={() => setIsApiKeyModalOpen(true)}
+            className="text-xs px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center border border-slate-700"
+          >
+            <Key size={14} className="mr-1.5" /> Manage Keys
+          </button>
         </div>
       </div>
 
-      <main className="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full z-10">
-        
+      <main className="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        {/* INITIAL UI */}
         {stage === ProcessStage.IDLE && (
-           <div className="mb-8 space-y-6">
-              <div className="text-center mb-8">
-                  <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
-                     Reimagine Your Products
-                  </h2>
-                  <p className="text-slate-500">Upload an image to clean, analyze, and generate stunning redesigns instantly.</p>
-              </div>
-
-              {/* Controls Container */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg">
-                 
-                 {/* Design Mode Selector */}
-                 <div className="flex flex-col">
-                    <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
-                        <Wand2 className="w-3 h-3 mr-1 text-purple-400" />
-                        Design Goal
-                    </label>
-                    <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
-                        <button 
-                            onClick={() => setDesignMode(DesignMode.NEW_CONCEPT)}
-                            className={`flex-1 py-2 text-xs font-medium rounded-md transition-all flex items-center justify-center ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                        >
-                            <Sparkles size={12} className="mr-1.5" />
-                            New Concept
-                        </button>
-                        <button 
-                            onClick={() => setDesignMode(DesignMode.ENHANCE_EXISTING)}
-                            className={`flex-1 py-2 text-xs font-medium rounded-md transition-all flex items-center justify-center ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
-                        >
-                            <Paintbrush size={12} className="mr-1.5" />
-                            Enhance Existing
-                        </button>
-                    </div>
-                 </div>
-
-                 {/* Product Type Selector */}
-                 <div className="flex flex-col">
-                    <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
-                        <Package className="w-3 h-3 mr-1 text-blue-400" />
-                        Product Type
-                    </label>
-                    <select
-                        value={productType}
-                        onChange={(e) => setProductType(e.target.value)}
-                        className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-sm rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                    >
-                        {PRODUCT_TYPES.map(type => (
-                            <option key={type} value={type}>{type}</option>
-                        ))}
-                    </select>
-                 </div>
-              </div>
-           </div>
-        )}
-
-        {/* Quick Actions (Before Upload) */}
-        {stage === ProcessStage.IDLE && (
-            <div className="flex justify-center mb-6">
-                <button
-                   onClick={() => setDesignMode(DesignMode.CLEAN_ONLY)}
-                   className={`flex items-center px-4 py-2 rounded-full text-xs font-bold transition-all border ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
-                >
-                   <Eraser size={14} className="mr-1.5" />
-                   Quick Tool: Remove Background Only
-                </button>
+          <>
+            <div className="text-center mb-8">
+              <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
+                Reimagine Your Products
+              </h2>
+              <p className="text-slate-500">Upload an image to begin.</p>
             </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg">
+
+              {/* Design Mode */}
+              <div className="flex flex-col">
+                <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
+                  <Wand2 className="w-3 h-3 mr-1 text-purple-400" /> Design Goal
+                </label>
+                <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
+                  <button
+                    onClick={() => setDesignMode(DesignMode.NEW_CONCEPT)}
+                    className={`flex-1 py-2 text-xs rounded-md ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                  >
+                    <Sparkles size={12} className="mr-1" /> New Concept
+                  </button>
+
+                  <button
+                    onClick={() => setDesignMode(DesignMode.ENHANCE_EXISTING)}
+                    className={`flex-1 py-2 text-xs rounded-md ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                  >
+                    <Paintbrush size={12} className="mr-1" /> Enhance Existing
+                  </button>
+                </div>
+              </div>
+
+              {/* Product Type */}
+              <div className="flex flex-col">
+                <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
+                  <Package className="w-3 h-3 mr-1 text-blue-400" /> Product Type
+                </label>
+                <select
+                  value={productType}
+                  onChange={(e) => setProductType(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-sm rounded-lg p-2.5"
+                >
+                  {PRODUCT_TYPES.map(type => (
+                    <option key={type} value={type}>{type}</option>
+                  ))}
+                </select>
+              </div>
+
+            </div>
+
+            {/* Quick Clean */}
+            <div className="flex justify-center mt-6">
+              <button
+                onClick={() => setDesignMode(DesignMode.CLEAN_ONLY)}
+                className={`px-4 py-2 rounded-full text-xs border ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
+              >
+                <Eraser size={14} className="mr-1 inline" />
+                Remove Background Only
+              </button>
+            </div>
+
+            <div className="max-w-2xl mx-auto mt-6">
+              <FileUpload onFileSelect={processFile} />
+            </div>
+
+          </>
         )}
 
-        {stage === ProcessStage.IDLE ? (
-          <div className="max-w-2xl mx-auto">
-            <FileUpload onFileSelect={processFile} />
-          </div>
-        ) : (
+        {/* PROCESSING */}
+        {stage !== ProcessStage.IDLE && (
           <>
             {error && (
-              <div className="mb-6 bg-red-950/30 border border-red-900/50 text-red-200 p-4 rounded-xl flex items-center shadow-lg animate-fade-in">
-                <AlertCircle className="w-5 h-5 mr-3 flex-shrink-0 text-red-500" />
-                <span className="text-sm font-medium">{error}</span>
-                <button 
-                    onClick={() => setStage(ProcessStage.IDLE)} 
-                    className="ml-auto text-xs bg-red-900/50 hover:bg-red-800 px-3 py-1.5 rounded-lg transition-colors border border-red-800"
+              <div className="mb-6 bg-red-950/30 border border-red-900/50 text-red-200 p-4 rounded-xl flex items-center">
+                <AlertCircle className="w-5 h-5 mr-3" />
+                <span>{error}</span>
+                <button
+                  onClick={() => setStage(ProcessStage.IDLE)}
+                  className="ml-auto text-xs bg-red-900/50 px-3 py-1.5 rounded border border-red-800"
                 >
-                    Try Again
+                  Try Again
                 </button>
               </div>
             )}
@@ -524,23 +533,24 @@ function App() {
             />
 
             {stage === ProcessStage.COMPLETE && (
-               <div className="mt-8 flex justify-center">
-                  <button
-                    onClick={() => {
-                        setStage(ProcessStage.IDLE);
-                        setOriginalImage(null);
-                        setProcessedImage(null);
-                        setRedesigns(null);
-                    }}
-                    className="flex items-center px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full font-bold shadow-lg transition-all border border-slate-700 hover:border-indigo-500"
-                  >
-                    <RefreshCw className="w-4 h-4 mr-2" />
-                    Start New Design
-                  </button>
-               </div>
+              <div className="mt-8 flex justify-center">
+                <button
+                  onClick={() => {
+                    setStage(ProcessStage.IDLE);
+                    setOriginalImage(null);
+                    setProcessedImage(null);
+                    setRedesigns(null);
+                  }}
+                  className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full border border-slate-700"
+                >
+                  <RefreshCw className="w-4 h-4 mr-2 inline" />
+                  Start New Design
+                </button>
+              </div>
             )}
           </>
         )}
+
       </main>
 
       <HistorySidebar
@@ -568,8 +578,8 @@ function App() {
           onGenerateMockup={handleGenerateMockup}
           onUpdateImage={handleUpdateRedesign}
           isRemixing={isRemixing}
-          onUndo={() => handleUndoRedesign(selectedRedesignIndex!)}
-          canUndo={(redesignHistory[selectedRedesignIndex!]?.length || 0) > 0}
+          onUndo={() => handleUndoRedesign(selectedRedesignIndex)}
+          canUndo={(redesignHistory[selectedRedesignIndex]?.length || 0) > 0}
         />
       )}
     </div>
