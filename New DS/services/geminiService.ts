@@ -12,31 +12,42 @@ export const cleanJsonString = (text: string) => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- API KEY MANAGEMENT (PAID BILLING) ---
-const API_KEYS = [
-  "AIzaSyABqklwZahC-ixZ4vvQ28Gjl6Np4Q7qdwc",
-  "AIzaSyDXSPV_UcVjG4u03-197gcym3h9bavO20Q",
-  "AIzaSyBIuCGUzbmAQHQejpByAq1SZI6wOu9U7HM"
-];
+// --- API KEY MANAGEMENT (VERCEL ENVIRONMENT VARIABLES) ---
+// Gets keys from process.env.API_KEY
+// Supports multiple keys separated by commas for load balancing (e.g. "Key1,Key2,Key3")
+const getApiKeys = (): string[] => {
+  const envKeys = process.env.API_KEY || "";
+  if (!envKeys) return [];
+  // Split by comma and clean whitespace
+  return envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
+};
 
+const API_KEYS = getApiKeys();
 let currentKeyIndex = 0;
 
 const getNextKey = () => {
+  if (API_KEYS.length === 0) {
+    console.error("NO API KEY FOUND. Please set API_KEY in Vercel Environment Variables.");
+    // Fallback meant to fail gracefully if env is missing
+    return "";
+  }
   const key = API_KEYS[currentKeyIndex];
   currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
-  // console.log(`Using API Key [${currentKeyIndex}]: ...${key.slice(-4)}`);
   return key;
 };
 
 // Initialize AI client with rotated key
 const getAiClient = () => {
   const apiKey = getNextKey();
+  if (!apiKey) {
+      throw new Error("Missing API Key in Environment Variables");
+  }
   return new GoogleGenAI({ apiKey });
 };
 
 // Robust retry logic for API calls
-// Reduced delays significantly since we are using Paid Keys
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 1000): Promise<T> {
+// Increased retry count and delays to handle 429 errors gracefully
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, initialDelay = 2000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
@@ -56,7 +67,7 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
             const isServerTransient = error?.status === 503 || error?.status === 500;
 
             if ((isRateLimit || isServerTransient) && i < retries - 1) {
-                console.warn(`Transient error. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
+                console.warn(`Transient error/Rate Limit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
                 await sleep(currentDelay);
                 currentDelay *= 2; 
                 continue;
@@ -195,8 +206,8 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
         });
         if (img) results.push(img);
         
-        // Minimal delay for Paid Keys
-        await sleep(500); 
+        // Throttled delay to prevent 429
+        await sleep(1000); 
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -241,10 +252,11 @@ export const generateProductRedesigns = async (
 
 
     const results: string[] = [];
-    // Generate 6 images sequentially (Paid keys are fast enough)
+    // Generate 6 images sequentially with safe delays
     for(let i=0; i<6; i++) {
-        // Minimal buffer for stability
-        await sleep(500); 
+        // Safe buffer to avoid hitting per-minute limits even with paid keys (burst protection)
+        // If you have 3 keys in ENV, this can be lower (e.g. 500ms), but 1000ms is safe for Vercel.
+        await sleep(1000); 
         
         try {
             const img = await executeWithRetry(async () => {
@@ -317,9 +329,9 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
 
         const isolatedImages: string[] = [];
         
-        // Fast sequence for Paid keys
+        // Throttled sequence
         for (const charName of characterList.slice(0, 4)) {
-             await sleep(500); 
+             await sleep(1000); 
              try {
                  const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
                  const resp = await ai.models.generateContent({
