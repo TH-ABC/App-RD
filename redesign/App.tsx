@@ -7,6 +7,7 @@ import { ApiKeyModal } from './components/ApiKeyModal';
 import { RedesignDetailModal } from './components/RedesignDetailModal';
 
 import {
+  setKeyPools,
   cleanupProductImage,
   analyzeProductDesign,
   generateProductRedesigns,
@@ -61,29 +62,32 @@ function App() {
   const [paidKeysCount, setPaidKeysCount] = useState(0);
   const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
 
-  // Only UI — backend no longer uses env keys
-  const envApiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
+  const envApiKey = process.env.REACT_APP_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   const hasEnvKey = envApiKey && envApiKey.length > 10;
-  const [useUltra, setUseUltra] = useState(false);
+  const [useUltra] = useState(false);
 
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   /* ----------------------------------------------------------
-     LOAD LOCAL KEY POOL (UI ONLY)
-     Dạng B KHÔNG dùng key pool nữa, nhưng vẫn giữ UI
+     LOAD LOCAL KEY POOL & INITIALIZE SERVICE
   ----------------------------------------------------------- */
   useEffect(() => {
-    const storedFree = localStorage.getItem('gemini_pool_free');
-    const storedPaid = localStorage.getItem('gemini_pool_paid');
+    try {
+      const storedFree = localStorage.getItem('gemini_pool_free');
+      const storedPaid = localStorage.getItem('gemini_pool_paid');
 
-    const free = storedFree ? JSON.parse(storedFree) : [];
-    const paid = storedPaid ? JSON.parse(storedPaid) : [];
+      const free = storedFree ? JSON.parse(storedFree) : [];
+      const paid = storedPaid ? JSON.parse(storedPaid) : [];
 
-    setFreeKeysCount(free.length);
-    setPaidKeysCount(paid.length);
+      // CRITICAL: Initialize the service's key pool
+      setKeyPools(free, paid);
 
-    if (paid.length > 0) setUseUltra(true);
+      setFreeKeysCount(free.length);
+      setPaidKeysCount(paid.length);
+    } catch (e) {
+      console.error("Failed to load API keys", e);
+    }
   }, []);
 
   /* ----------------------------------------------------------
@@ -92,26 +96,34 @@ function App() {
   useEffect(() => {
     try {
       const savedHistory = localStorage.getItem('product_perfect_history');
-      if (savedHistory) setHistory(JSON.parse(savedHistory));
+      if (savedHistory) {
+        setHistory(JSON.parse(savedHistory));
+      }
     } catch (e) {
       console.error("Failed to load history", e);
     }
   }, []);
 
   /* ----------------------------------------------------------
-     SAVE API KEYS (UI ONLY)
+     SAVE API KEYS
   ----------------------------------------------------------- */
   const handleSaveKeys = (free: string[], paid: string[]) => {
-    localStorage.setItem('gemini_pool_free', JSON.stringify(free));
-    localStorage.setItem('gemini_pool_paid', JSON.stringify(paid));
+    try {
+      localStorage.setItem('gemini_pool_free', JSON.stringify(free));
+      localStorage.setItem('gemini_pool_paid', JSON.stringify(paid));
 
-    setFreeKeysCount(free.length);
-    setPaidKeysCount(paid.length);
+      // CRITICAL: Update the service's key pool
+      setKeyPools(free, paid);
 
-    if (paid.length > 0) setUseUltra(true);
+      setFreeKeysCount(free.length);
+      setPaidKeysCount(paid.length);
 
-    setIsApiKeyModalOpen(false);
-    setError(null);
+      setIsApiKeyModalOpen(false);
+      setError(null);
+    } catch (e) {
+      console.error("Failed to save API keys", e);
+      setError("Failed to save API keys");
+    }
   };
 
   /* ----------------------------------------------------------
@@ -179,11 +191,36 @@ function App() {
   const hasKeys = freeKeysCount > 0 || paidKeysCount > 0;
 
   /* ----------------------------------------------------------
+     ERROR HANDLING
+  ----------------------------------------------------------- */
+  const handleQuotaError = (err: any) => {
+    const msg = err.message || err.toString();
+    
+    if (msg.includes("No API Keys configured")) {
+      setError("Chưa cấu hình API Key. Vui lòng thêm API key.");
+      setIsApiKeyModalOpen(true);
+      return;
+    }
+    
+    if (msg.includes("429") || msg.includes("quota") || msg.includes("exceeded")) {
+      if (!hasKeys && !hasEnvKey) {
+        setError("Dung lượng miễn phí hết. Vui lòng thêm API key.");
+        setIsApiKeyModalOpen(true);
+      } else {
+        setError("API quota exceeded. Vui lòng thử lại sau hoặc thêm key mới.");
+      }
+      return;
+    }
+    
+    setError(msg);
+  };
+
+  /* ----------------------------------------------------------
      FILE SELECT → PROCESSING
   ----------------------------------------------------------- */
   const processFile = (file: File) => {
     if (!hasKeys && !hasEnvKey) {
-      setError("Không tìm thấy API Key hệ thống. Vui lòng nhập API Key.");
+      setError("Không tìm thấy API Key. Vui lòng nhập API Key.");
       setIsApiKeyModalOpen(true);
       return;
     }
@@ -210,22 +247,6 @@ function App() {
     reader.readAsDataURL(file);
   };
 
-  const handleQuotaError = (err: any) => {
-    const msg = err.message || err.toString();
-    if (msg.includes("No API Keys configured")) {
-      setError("Chưa cấu hình API Key.");
-      setIsApiKeyModalOpen(true);
-      return;
-    }
-    if (msg.includes("429") || msg.includes("quota")) {
-      if (!hasKeys)
-        setError("Dung lượng miễn phí hết. Vui lòng thêm API key.");
-      else setError(msg);
-      return;
-    }
-    setError(msg);
-  };
-
   /* ----------------------------------------------------------
      QUICK CLEAN
   ----------------------------------------------------------- */
@@ -236,6 +257,7 @@ function App() {
       setProcessedImage(cleaned);
       setStage(ProcessStage.COMPLETE);
     } catch (err) {
+      console.error("Clean error:", err);
       handleQuotaError(err);
       setStage(ProcessStage.IDLE);
     }
@@ -247,7 +269,6 @@ function App() {
   const startAnalysis = async (image: string) => {
     try {
       setStage(ProcessStage.CLEANING);
-
       const cleaned = await cleanupProductImage(image);
       setProcessedImage(cleaned);
 
@@ -273,11 +294,14 @@ function App() {
         setRedesigns(redesigns);
         setStage(ProcessStage.COMPLETE);
 
+        // Optional: Send to Google Sheets
         sendDataToSheet(
           redesigns,
           analysisResult.redesignPrompt,
           analysisResult.description || "N/A"
-        ).catch(() => {});
+        ).catch((err) => {
+          console.warn("Failed to send to Google Sheets:", err);
+        });
 
         addToHistory(
           image,
@@ -288,11 +312,16 @@ function App() {
           designMode,
           RopeType.NONE
         );
+      } else {
+        setStage(ProcessStage.COMPLETE);
       }
 
     } catch (err) {
+      console.error("Analysis error:", err);
       handleQuotaError(err);
-      if (stage !== ProcessStage.COMPLETE) setStage(ProcessStage.IDLE);
+      if (stage !== ProcessStage.COMPLETE) {
+        setStage(ProcessStage.IDLE);
+      }
     }
   };
 
@@ -341,6 +370,7 @@ function App() {
       setRedesigns(updated);
 
     } catch (err) {
+      console.error("Remix error:", err);
       handleQuotaError(err);
     } finally {
       setIsRemixing(false);
@@ -372,6 +402,7 @@ function App() {
       updated[selectedRedesignIndex] = cleanedImage;
       setRedesigns(updated);
     } catch (err) {
+      console.error("Remove bg error:", err);
       handleQuotaError(err);
     } finally {
       setIsRemixing(false);
@@ -380,11 +411,21 @@ function App() {
 
   const handleSplit = async () => {
     if (selectedRedesignIndex == null || !generatedRedesigns) return [];
-    return detectAndSplitCharacters(generatedRedesigns[selectedRedesignIndex]);
+    try {
+      return await detectAndSplitCharacters(generatedRedesigns[selectedRedesignIndex]);
+    } catch (err) {
+      console.error("Split error:", err);
+      return [];
+    }
   };
 
   const handleGenerateMockup = async (image: string) => {
-    return generateRandomMockup(image);
+    try {
+      return await generateRandomMockup(image);
+    } catch (err) {
+      console.error("Mockup error:", err);
+      throw err;
+    }
   };
 
   /* ----------------------------------------------------------
@@ -457,14 +498,14 @@ function App() {
                 <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
                   <button
                     onClick={() => setDesignMode(DesignMode.NEW_CONCEPT)}
-                    className={`flex-1 py-2 text-xs rounded-md ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    className={`flex-1 py-2 text-xs rounded-md flex items-center justify-center ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
                   >
                     <Sparkles size={12} className="mr-1" /> New Concept
                   </button>
 
                   <button
                     onClick={() => setDesignMode(DesignMode.ENHANCE_EXISTING)}
-                    className={`flex-1 py-2 text-xs rounded-md ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    className={`flex-1 py-2 text-xs rounded-md flex items-center justify-center ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
                   >
                     <Paintbrush size={12} className="mr-1" /> Enhance Existing
                   </button>
@@ -493,9 +534,9 @@ function App() {
             <div className="flex justify-center mt-6">
               <button
                 onClick={() => setDesignMode(DesignMode.CLEAN_ONLY)}
-                className={`px-4 py-2 rounded-full text-xs border ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                className={`px-4 py-2 rounded-full text-xs border flex items-center ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
               >
-                <Eraser size={14} className="mr-1 inline" />
+                <Eraser size={14} className="mr-1" />
                 Remove Background Only
               </button>
             </div>
@@ -515,8 +556,11 @@ function App() {
                 <AlertCircle className="w-5 h-5 mr-3" />
                 <span>{error}</span>
                 <button
-                  onClick={() => setStage(ProcessStage.IDLE)}
-                  className="ml-auto text-xs bg-red-900/50 px-3 py-1.5 rounded border border-red-800"
+                  onClick={() => {
+                    setStage(ProcessStage.IDLE);
+                    setError(null);
+                  }}
+                  className="ml-auto text-xs bg-red-900/50 px-3 py-1.5 rounded border border-red-800 hover:bg-red-900/70"
                 >
                   Try Again
                 </button>
@@ -540,10 +584,11 @@ function App() {
                     setOriginalImage(null);
                     setProcessedImage(null);
                     setRedesigns(null);
+                    setError(null);
                   }}
-                  className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full border border-slate-700"
+                  className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full border border-slate-700 flex items-center"
                 >
-                  <RefreshCw className="w-4 h-4 mr-2 inline" />
+                  <RefreshCw className="w-4 h-4 mr-2" />
                   Start New Design
                 </button>
               </div>
