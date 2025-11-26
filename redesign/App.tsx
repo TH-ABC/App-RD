@@ -1,632 +1,394 @@
-import React, { useState, useEffect } from 'react';
-import { Header } from './components/Header';
-import { FileUpload } from './components/FileUpload';
-import { ResultsPanel } from './components/ResultsPanel';
-import { HistorySidebar } from './components/HistorySidebar';
-import { ApiKeyModal } from './components/ApiKeyModal';
-import { RedesignDetailModal } from './components/RedesignDetailModal';
-
+import React, { useState, useRef } from "react";
 import {
-  setKeyPools,
   cleanupProductImage,
   analyzeProductDesign,
   generateProductRedesigns,
-  extractDesignElements,
   remixProductImage,
   detectAndSplitCharacters,
-  generateRandomMockup
-} from './services/geminiService';
-
-import { sendDataToSheet } from './services/googleSheetService';
-import {
-  ProductAnalysis,
-  ProcessStage,
-  PRODUCT_TYPES,
-  HistoryItem,
-  DesignMode,
-  RopeType
-} from './types';
-
-import {
-  AlertCircle,
-  RefreshCw,
-  Key,
-  Layers,
-  Eraser,
-  Sparkles,
-  Zap,
-  Package,
-  Wand2,
-  Paintbrush,
-  AlertTriangle
-} from 'lucide-react';
+  generateRandomMockup,
+  extractDesignElements
+} from "./services/geminiService";
 
 function App() {
-  const [originalImage, setOriginalImage] = useState<string | null>(null);
-  const [processedImage, setProcessedImage] = useState<string | null>(null);
-  const [extractedElements, setExtractedElements] = useState<string[] | null>(null);
-  const [analysis, setAnalysis] = useState<ProductAnalysis | null>(null);
-  const [generatedRedesigns, setRedesigns] = useState<string[] | null>(null);
-  const [stage, setStage] = useState<ProcessStage>(ProcessStage.IDLE);
-  const [error, setError] = useState<string | null>(null);
+  const [step, setStep] = useState<"upload" | "analyze" | "redesign">("upload");
+  const [originalImage, setOriginalImage] = useState<string>("");
+  const [cleanedImage, setCleanedImage] = useState<string>("");
+  const [analysis, setAnalysis] = useState<any>(null);
+  const [redesigns, setRedesigns] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  
+  const [productType, setProductType] = useState("t-shirt");
+  const [designMode, setDesignMode] = useState("modern");
+  const [customPrompt, setCustomPrompt] = useState("");
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]);
-  const [designMode, setDesignMode] = useState<DesignMode>(DesignMode.NEW_CONCEPT);
+  // Upload và cleanup image
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
 
-  const [selectedRedesignIndex, setSelectedRedesignIndex] = useState<number | null>(null);
-  const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
-  const [isRemixing, setIsRemixing] = useState(false);
-  const [redesignHistory, setRedesignHistory] = useState<Record<number, string[]>>({});
+    setLoading(true);
+    setError("");
 
-  const [freeKeysCount, setFreeKeysCount] = useState(0);
-  const [paidKeysCount, setPaidKeysCount] = useState(0);
-  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
-
-  const envApiKey = process.env.REACT_APP_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  const hasEnvKey = envApiKey && envApiKey.length > 10;
-  const [useUltra] = useState(false);
-
-  const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-
-  /* ----------------------------------------------------------
-     LOAD LOCAL KEY POOL & INITIALIZE SERVICE
-  ----------------------------------------------------------- */
-  useEffect(() => {
     try {
-      const storedFree = localStorage.getItem('gemini_pool_free');
-      const storedPaid = localStorage.getItem('gemini_pool_paid');
-
-      const free = storedFree ? JSON.parse(storedFree) : [];
-      const paid = storedPaid ? JSON.parse(storedPaid) : [];
-
-      // CRITICAL: Initialize the service's key pool
-      setKeyPools(free, paid);
-
-      setFreeKeysCount(free.length);
-      setPaidKeysCount(paid.length);
-    } catch (e) {
-      console.error("Failed to load API keys", e);
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const base64 = event.target?.result as string;
+        setOriginalImage(base64);
+        
+        console.log("🧹 Cleaning up image...");
+        const cleaned = await cleanupProductImage(base64);
+        setCleanedImage(cleaned);
+        
+        setStep("analyze");
+        setLoading(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
-  }, []);
+  };
 
-  /* ----------------------------------------------------------
-     LOAD HISTORY
-  ----------------------------------------------------------- */
-  useEffect(() => {
+  // Analyze product design
+  const handleAnalyze = async () => {
+    if (!cleanedImage) return;
+
+    setLoading(true);
+    setError("");
+
     try {
-      const savedHistory = localStorage.getItem('product_perfect_history');
-      if (savedHistory) {
-        setHistory(JSON.parse(savedHistory));
-      }
-    } catch (e) {
-      console.error("Failed to load history", e);
+      console.log("🔍 Analyzing product design...");
+      const result = await analyzeProductDesign(
+        cleanedImage,
+        productType,
+        designMode
+      );
+      
+      setAnalysis(result);
+      setStep("redesign");
+      setLoading(false);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
-  }, []);
+  };
 
-  /* ----------------------------------------------------------
-     SAVE API KEYS
-  ----------------------------------------------------------- */
-  const handleSaveKeys = (free: string[], paid: string[]) => {
+  // Generate redesigns
+  const handleGenerateRedesigns = async () => {
+    if (!analysis) return;
+
+    setLoading(true);
+    setError("");
+
     try {
-      localStorage.setItem('gemini_pool_free', JSON.stringify(free));
-      localStorage.setItem('gemini_pool_paid', JSON.stringify(paid));
-
-      // CRITICAL: Update the service's key pool
-      setKeyPools(free, paid);
-
-      setFreeKeysCount(free.length);
-      setPaidKeysCount(paid.length);
-
-      setIsApiKeyModalOpen(false);
-      setError(null);
-    } catch (e) {
-      console.error("Failed to save API keys", e);
-      setError("Failed to save API keys");
+      console.log("🎨 Generating redesigns...");
+      const prompt = customPrompt || analysis.redesignPrompt;
+      
+      const results = await generateProductRedesigns(
+        prompt,
+        "default",
+        [],
+        customPrompt,
+        productType,
+        false
+      );
+      
+      setRedesigns(results);
+      setLoading(false);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
   };
 
-  /* ----------------------------------------------------------
-     HISTORY HELPERS
-  ----------------------------------------------------------- */
-  const saveHistoryToStorage = (items: HistoryItem[]) => {
+  // Remix specific design
+  const handleRemix = async (imageBase64: string) => {
+    const instruction = prompt("Enter remix instruction:");
+    if (!instruction) return;
+
+    setLoading(true);
+    setError("");
+
     try {
-      localStorage.setItem('product_perfect_history', JSON.stringify(items));
-    } catch {
-      if (items.length > 1) {
-        const reduced = items.slice(0, -1);
-        saveHistoryToStorage(reduced);
-        setHistory(reduced);
-      }
+      const remixed = await remixProductImage(imageBase64, instruction);
+      setRedesigns([remixed, ...redesigns]);
+      setLoading(false);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
   };
 
-  const addToHistory = (
-    orig: string,
-    proc: string | null,
-    anal: ProductAnalysis | null,
-    redesigns: string[] | null,
-    pType: string,
-    dMode: DesignMode,
-    rType: RopeType
-  ) => {
-    const newItem: HistoryItem = {
-      id: Date.now().toString(),
-      timestamp: Date.now(),
-      originalImage: orig,
-      processedImage: proc,
-      analysis: anal,
-      generatedRedesigns: redesigns,
-      productType: pType,
-      designMode: dMode,
-      ropeType: rType
-    };
+  // Generate mockup
+  const handleMockup = async (imageBase64: string) => {
+    setLoading(true);
+    setError("");
 
-    const newHistory = [newItem, ...history];
-    setHistory(newHistory);
-    saveHistoryToStorage(newHistory);
-  };
-
-  const handleDeleteHistory = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const newHistory = history.filter(item => item.id !== id);
-    setHistory(newHistory);
-    saveHistoryToStorage(newHistory);
-  };
-
-  const handleLoadHistory = (item: HistoryItem) => {
-    setOriginalImage(item.originalImage);
-    setProcessedImage(item.processedImage);
-    setAnalysis(item.analysis);
-    setRedesigns(item.generatedRedesigns);
-    setProductType(item.productType);
-    setDesignMode(item.designMode || DesignMode.NEW_CONCEPT);
-    setStage(ProcessStage.COMPLETE);
-    setError(null);
-    setIsHistoryOpen(false);
-    setExtractedElements(null);
-    setRedesignHistory({});
-  };
-
-  const hasKeys = freeKeysCount > 0 || paidKeysCount > 0;
-
-  /* ----------------------------------------------------------
-     ERROR HANDLING
-  ----------------------------------------------------------- */
-  const handleQuotaError = (err: any) => {
-    const msg = err.message || err.toString();
-    
-    if (msg.includes("No API Keys configured")) {
-      setError("Chưa cấu hình API Key. Vui lòng thêm API key.");
-      setIsApiKeyModalOpen(true);
-      return;
+    try {
+      const mockup = await generateRandomMockup(imageBase64);
+      window.open(mockup, "_blank");
+      setLoading(false);
+    } catch (err: any) {
+      setError(err.message);
+      setLoading(false);
     }
-    
-    if (msg.includes("429") || msg.includes("quota") || msg.includes("exceeded")) {
-      if (!hasKeys && !hasEnvKey) {
-        setError("Dung lượng miễn phí hết. Vui lòng thêm API key.");
-        setIsApiKeyModalOpen(true);
-      } else {
-        setError("API quota exceeded. Vui lòng thử lại sau hoặc thêm key mới.");
-      }
-      return;
-    }
-    
-    setError(msg);
   };
 
-  /* ----------------------------------------------------------
-     FILE SELECT → PROCESSING
-  ----------------------------------------------------------- */
-  const processFile = (file: File) => {
-    if (!hasKeys && !hasEnvKey) {
-      setError("Không tìm thấy API Key. Vui lòng nhập API Key.");
-      setIsApiKeyModalOpen(true);
-      return;
-    }
+  // Download image
+  const handleDownload = (imageBase64: string, filename: string) => {
+    const link = document.createElement("a");
+    link.href = imageBase64;
+    link.download = filename;
+    link.click();
+  };
 
-    setStage(ProcessStage.UPLOADING);
-    setError(null);
-    setProcessedImage(null);
+  // Reset app
+  const handleReset = () => {
+    setStep("upload");
+    setOriginalImage("");
+    setCleanedImage("");
     setAnalysis(null);
-    setRedesigns(null);
-    setExtractedElements(null);
-    setRedesignHistory({});
-
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = reader.result as string;
-      setOriginalImage(base64);
-
-      if (designMode === DesignMode.CLEAN_ONLY) {
-        startQuickClean(base64);
-      } else {
-        startAnalysis(base64);
-      }
-    };
-    reader.readAsDataURL(file);
+    setRedesigns([]);
+    setError("");
   };
-
-  /* ----------------------------------------------------------
-     QUICK CLEAN
-  ----------------------------------------------------------- */
-  const startQuickClean = async (image: string) => {
-    try {
-      setStage(ProcessStage.CLEANING);
-      const cleaned = await cleanupProductImage(image);
-      setProcessedImage(cleaned);
-      setStage(ProcessStage.COMPLETE);
-    } catch (err) {
-      console.error("Clean error:", err);
-      handleQuotaError(err);
-      setStage(ProcessStage.IDLE);
-    }
-  };
-
-  /* ----------------------------------------------------------
-     FULL PIPELINE
-  ----------------------------------------------------------- */
-  const startAnalysis = async (image: string) => {
-    try {
-      setStage(ProcessStage.CLEANING);
-      const cleaned = await cleanupProductImage(image);
-      setProcessedImage(cleaned);
-
-      setStage(ProcessStage.ANALYZING);
-      const analysisResult = await analyzeProductDesign(image, productType, designMode);
-      setAnalysis(analysisResult);
-
-      const extracted = await extractDesignElements(image);
-      setExtractedElements(extracted);
-
-      if (analysisResult?.redesignPrompt) {
-        setStage(ProcessStage.GENERATING);
-
-        const redesigns = await generateProductRedesigns(
-          analysisResult.redesignPrompt,
-          RopeType.NONE,
-          [],
-          "",
-          productType,
-          useUltra
-        );
-
-        setRedesigns(redesigns);
-        setStage(ProcessStage.COMPLETE);
-
-        // Optional: Send to Google Sheets
-        sendDataToSheet(
-          redesigns,
-          analysisResult.redesignPrompt,
-          analysisResult.description || "N/A"
-        ).catch((err) => {
-          console.warn("Failed to send to Google Sheets:", err);
-        });
-
-        addToHistory(
-          image,
-          cleaned,
-          analysisResult,
-          redesigns,
-          productType,
-          designMode,
-          RopeType.NONE
-        );
-      } else {
-        setStage(ProcessStage.COMPLETE);
-      }
-
-    } catch (err) {
-      console.error("Analysis error:", err);
-      handleQuotaError(err);
-      if (stage !== ProcessStage.COMPLETE) {
-        setStage(ProcessStage.IDLE);
-      }
-    }
-  };
-
-  /* ----------------------------------------------------------
-     REDESIGN MODAL HANDLERS
-  ----------------------------------------------------------- */
-  const handleRedesignClick = (index: number) => {
-    setSelectedRedesignIndex(index);
-    setIsDetailModalOpen(true);
-  };
-
-  const pushUndo = (index: number, current: string) => {
-    setRedesignHistory(prev => ({
-      ...prev,
-      [index]: [...(prev[index] || []), current]
-    }));
-  };
-
-  const handleUndoRedesign = (index: number) => {
-    if (!generatedRedesigns) return;
-    const stack = redesignHistory[index];
-    if (!stack?.length) return;
-
-    const previous = stack[stack.length - 1];
-    const newStack = stack.slice(0, -1);
-
-    setRedesignHistory(prev => ({ ...prev, [index]: newStack }));
-
-    const newList = [...generatedRedesigns];
-    newList[index] = previous;
-    setRedesigns(newList);
-  };
-
-  const handleRemix = async (instruction: string) => {
-    if (selectedRedesignIndex == null || !generatedRedesigns) return;
-
-    setIsRemixing(true);
-    try {
-      const current = generatedRedesigns[selectedRedesignIndex];
-      pushUndo(selectedRedesignIndex, current);
-
-      const newImage = await remixProductImage(current, instruction);
-
-      const updated = [...generatedRedesigns];
-      updated[selectedRedesignIndex] = newImage;
-      setRedesigns(updated);
-
-    } catch (err) {
-      console.error("Remix error:", err);
-      handleQuotaError(err);
-    } finally {
-      setIsRemixing(false);
-    }
-  };
-
-  const handleUpdateRedesign = (newImg: string) => {
-    if (selectedRedesignIndex == null || !generatedRedesigns) return;
-
-    const current = generatedRedesigns[selectedRedesignIndex];
-    pushUndo(selectedRedesignIndex, current);
-
-    const updated = [...generatedRedesigns];
-    updated[selectedRedesignIndex] = newImg;
-    setRedesigns(updated);
-  };
-
-  const handleRemoveBackground = async () => {
-    if (selectedRedesignIndex == null || !generatedRedesigns) return;
-
-    setIsRemixing(true);
-    try {
-      const current = generatedRedesigns[selectedRedesignIndex];
-      pushUndo(selectedRedesignIndex, current);
-
-      const cleanedImage = await cleanupProductImage(current);
-
-      const updated = [...generatedRedesigns];
-      updated[selectedRedesignIndex] = cleanedImage;
-      setRedesigns(updated);
-    } catch (err) {
-      console.error("Remove bg error:", err);
-      handleQuotaError(err);
-    } finally {
-      setIsRemixing(false);
-    }
-  };
-
-  const handleSplit = async () => {
-    if (selectedRedesignIndex == null || !generatedRedesigns) return [];
-    try {
-      return await detectAndSplitCharacters(generatedRedesigns[selectedRedesignIndex]);
-    } catch (err) {
-      console.error("Split error:", err);
-      return [];
-    }
-  };
-
-  const handleGenerateMockup = async (image: string) => {
-    try {
-      return await generateRandomMockup(image);
-    } catch (err) {
-      console.error("Mockup error:", err);
-      throw err;
-    }
-  };
-
-  /* ----------------------------------------------------------
-     UI RENDER
-  ----------------------------------------------------------- */
 
   return (
-    <div className="min-h-screen bg-slate-950 flex flex-col relative overflow-x-hidden text-slate-200">
-      <Header onHistoryClick={() => setIsHistoryOpen(true)} />
-
-      {/* Top Bar */}
-      <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
-
-          {/* Connection Indicator */}
-          <div className="flex items-center text-xs text-slate-400">
-            {(freeKeysCount > 0 || paidKeysCount > 0) ? (
-              <div className="flex items-center space-x-2">
-                <div className="flex items-center bg-indigo-900/30 text-indigo-300 px-3 py-1.5 rounded-full border border-indigo-800">
-                  <Layers className="w-3.5 h-3.5 mr-1.5" />
-                  <span className="mr-1 font-medium">Pool:</span>
-                  <span>{freeKeysCount} Free, {paidKeysCount} Paid</span>
-                </div>
-              </div>
-            ) : (
-              <div className={`flex items-center px-3 py-1.5 rounded-full border ${hasEnvKey ? 'bg-slate-800 text-slate-500 border-slate-700' : 'bg-red-950/30 text-red-400 border-red-900/50'}`}>
-                {hasEnvKey ? (
-                  <>
-                    <Zap className="w-3.5 h-3.5 mr-1.5 text-blue-400" />
-                    <span>Using Default Free Quota</span>
-                  </>
-                ) : (
-                  <>
-                    <AlertTriangle className="w-3.5 h-3.5 mr-1.5" />
-                    <span>No Default Key</span>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-
-          <button
-            onClick={() => setIsApiKeyModalOpen(true)}
-            className="text-xs px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 flex items-center border border-slate-700"
-          >
-            <Key size={14} className="mr-1.5" /> Manage Keys
-          </button>
+    <div className="min-h-screen bg-gradient-to-br from-purple-50 via-blue-50 to-pink-50 p-8">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-12">
+          <h1 className="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-600 to-pink-600 mb-4">
+            🎨 AI Product Designer Pro
+          </h1>
+          <p className="text-gray-600 text-lg">
+            Upload → Analyze → Generate 6 Unique Redesigns
+          </p>
         </div>
-      </div>
 
-      <main className="flex-grow max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 text-red-700 px-6 py-4 rounded-lg mb-6">
+            <strong>Error:</strong> {error}
+          </div>
+        )}
 
-        {/* INITIAL UI */}
-        {stage === ProcessStage.IDLE && (
-          <>
-            <div className="text-center mb-8">
-              <h2 className="text-3xl font-bold bg-gradient-to-r from-indigo-400 to-purple-400 bg-clip-text text-transparent mb-2">
-                Reimagine Your Products
-              </h2>
-              <p className="text-slate-500">Upload an image to begin.</p>
+        {/* Loading Indicator */}
+        {loading && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-2xl p-8 text-center">
+              <div className="animate-spin w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full mx-auto mb-4"></div>
+              <p className="text-xl font-semibold">Processing...</p>
             </div>
+          </div>
+        )}
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-lg">
+        {/* Step 1: Upload */}
+        {step === "upload" && (
+          <div className="bg-white rounded-2xl shadow-2xl p-12 text-center">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleImageUpload}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="bg-gradient-to-r from-purple-600 to-pink-600 text-white px-12 py-6 rounded-xl text-xl font-bold hover:scale-105 transition-transform"
+            >
+              📤 Upload Product Image
+            </button>
+            <p className="text-gray-500 mt-4">
+              Supports: JPG, PNG, WEBP (max 20MB)
+            </p>
+          </div>
+        )}
 
-              {/* Design Mode */}
-              <div className="flex flex-col">
-                <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
-                  <Wand2 className="w-3 h-3 mr-1 text-purple-400" /> Design Goal
-                </label>
-                <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
-                  <button
-                    onClick={() => setDesignMode(DesignMode.NEW_CONCEPT)}
-                    className={`flex-1 py-2 text-xs rounded-md flex items-center justify-center ${designMode === DesignMode.NEW_CONCEPT ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
-                  >
-                    <Sparkles size={12} className="mr-1" /> New Concept
-                  </button>
-
-                  <button
-                    onClick={() => setDesignMode(DesignMode.ENHANCE_EXISTING)}
-                    className={`flex-1 py-2 text-xs rounded-md flex items-center justify-center ${designMode === DesignMode.ENHANCE_EXISTING ? 'bg-purple-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
-                  >
-                    <Paintbrush size={12} className="mr-1" /> Enhance Existing
-                  </button>
+        {/* Step 2: Analyze */}
+        {step === "analyze" && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl shadow-2xl p-8">
+              <h2 className="text-2xl font-bold mb-6">🔍 Product Analysis</h2>
+              
+              <div className="grid grid-cols-2 gap-6 mb-6">
+                {/* Original Image */}
+                <div>
+                  <h3 className="font-semibold mb-2">Original</h3>
+                  <img
+                    src={originalImage}
+                    alt="Original"
+                    className="w-full h-64 object-contain bg-gray-50 rounded-lg"
+                  />
+                </div>
+                
+                {/* Cleaned Image */}
+                <div>
+                  <h3 className="font-semibold mb-2">Cleaned (No Background)</h3>
+                  <img
+                    src={cleanedImage}
+                    alt="Cleaned"
+                    className="w-full h-64 object-contain bg-gray-50 rounded-lg"
+                  />
                 </div>
               </div>
 
-              {/* Product Type */}
-              <div className="flex flex-col">
-                <label className="text-xs font-bold text-slate-400 uppercase mb-2 flex items-center">
-                  <Package className="w-3 h-3 mr-1 text-blue-400" /> Product Type
-                </label>
-                <select
-                  value={productType}
-                  onChange={(e) => setProductType(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-sm rounded-lg p-2.5"
-                >
-                  {PRODUCT_TYPES.map(type => (
-                    <option key={type} value={type}>{type}</option>
-                  ))}
-                </select>
+              {/* Settings */}
+              <div className="space-y-4 mb-6">
+                <div>
+                  <label className="block font-semibold mb-2">Product Type</label>
+                  <select
+                    value={productType}
+                    onChange={(e) => setProductType(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg"
+                  >
+                    <option value="t-shirt">T-Shirt</option>
+                    <option value="mug">Mug</option>
+                    <option value="poster">Poster</option>
+                    <option value="sticker">Sticker</option>
+                    <option value="phone-case">Phone Case</option>
+                    <option value="tote-bag">Tote Bag</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold mb-2">Design Mode</label>
+                  <select
+                    value={designMode}
+                    onChange={(e) => setDesignMode(e.target.value)}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg"
+                  >
+                    <option value="modern">Modern & Minimal</option>
+                    <option value="vintage">Vintage & Retro</option>
+                    <option value="bold">Bold & Vibrant</option>
+                    <option value="elegant">Elegant & Luxury</option>
+                    <option value="playful">Playful & Fun</option>
+                  </select>
+                </div>
               </div>
 
-            </div>
-
-            {/* Quick Clean */}
-            <div className="flex justify-center mt-6">
               <button
-                onClick={() => setDesignMode(DesignMode.CLEAN_ONLY)}
-                className={`px-4 py-2 rounded-full text-xs border flex items-center ${designMode === DesignMode.CLEAN_ONLY ? 'bg-teal-900/30 text-teal-300 border-teal-500/50' : 'bg-slate-900 text-slate-500 border-slate-800 hover:border-slate-600'}`}
+                onClick={handleAnalyze}
+                disabled={loading}
+                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white px-8 py-4 rounded-xl text-lg font-bold hover:scale-105 transition-transform disabled:opacity-50"
               >
-                <Eraser size={14} className="mr-1" />
-                Remove Background Only
+                🚀 Analyze & Continue
               </button>
             </div>
+          </div>
+        )}
 
-            <div className="max-w-2xl mx-auto mt-6">
-              <FileUpload onFileSelect={processFile} />
+        {/* Step 3: Redesign */}
+        {step === "redesign" && (
+          <div className="space-y-6">
+            {/* Analysis Results */}
+            {analysis && (
+              <div className="bg-white rounded-2xl shadow-2xl p-8">
+                <h2 className="text-2xl font-bold mb-4">📊 Analysis Results</h2>
+                <div className="grid grid-cols-2 gap-6">
+                  <div>
+                    <h3 className="font-semibold text-lg mb-2">{analysis.title}</h3>
+                    <p className="text-gray-600 mb-4">{analysis.description}</p>
+                    <div className="flex flex-wrap gap-2">
+                      {analysis.detectedComponents?.map((comp: string, i: number) => (
+                        <span
+                          key={i}
+                          className="px-3 py-1 bg-purple-100 text-purple-700 rounded-full text-sm"
+                        >
+                          {comp}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <img
+                      src={cleanedImage}
+                      alt="Product"
+                      className="w-full h-48 object-contain bg-gray-50 rounded-lg"
+                    />
+                  </div>
+                </div>
+
+                {/* Custom Prompt */}
+                <div className="mt-6">
+                  <label className="block font-semibold mb-2">
+                    Custom Prompt (Optional)
+                  </label>
+                  <textarea
+                    value={customPrompt}
+                    onChange={(e) => setCustomPrompt(e.target.value)}
+                    placeholder={analysis.redesignPrompt}
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg h-24"
+                  />
+                </div>
+
+                <button
+                  onClick={handleGenerateRedesigns}
+                  disabled={loading}
+                  className="w-full mt-4 bg-gradient-to-r from-pink-600 to-purple-600 text-white px-8 py-4 rounded-xl text-lg font-bold hover:scale-105 transition-transform disabled:opacity-50"
+                >
+                  ✨ Generate 6 Redesigns
+                </button>
+              </div>
+            )}
+
+            {/* Redesign Results */}
+            {redesigns.length > 0 && (
+              <div className="bg-white rounded-2xl shadow-2xl p-8">
+                <h2 className="text-2xl font-bold mb-6">
+                  🎨 Generated Redesigns ({redesigns.length})
+                </h2>
+                <div className="grid grid-cols-3 gap-6">
+                  {redesigns.map((img, i) => (
+                    <div
+                      key={i}
+                      className="relative group bg-gray-50 rounded-lg overflow-hidden"
+                    >
+                      <img
+                        src={img}
+                        alt={`Redesign ${i + 1}`}
+                        className="w-full h-64 object-contain"
+                      />
+                      <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
+                        <button
+                          onClick={() => handleDownload(img, `redesign-${i + 1}.png`)}
+                          className="bg-white text-gray-800 px-4 py-2 rounded-lg font-semibold hover:bg-gray-100"
+                        >
+                          💾 Download
+                        </button>
+                        <button
+                          onClick={() => handleRemix(img)}
+                          className="bg-purple-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-purple-700"
+                        >
+                          🔄 Remix
+                        </button>
+                        <button
+                          onClick={() => handleMockup(img)}
+                          className="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-blue-700"
+                        >
+                          📸 Mockup
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Reset Button */}
+            <div className="text-center">
+              <button
+                onClick={handleReset}
+                className="bg-gray-200 text-gray-800 px-8 py-3 rounded-xl font-semibold hover:bg-gray-300"
+              >
+                🔄 Start Over
+              </button>
             </div>
-
-          </>
+          </div>
         )}
-
-        {/* PROCESSING */}
-        {stage !== ProcessStage.IDLE && (
-          <>
-            {error && (
-              <div className="mb-6 bg-red-950/30 border border-red-900/50 text-red-200 p-4 rounded-xl flex items-center">
-                <AlertCircle className="w-5 h-5 mr-3" />
-                <span>{error}</span>
-                <button
-                  onClick={() => {
-                    setStage(ProcessStage.IDLE);
-                    setError(null);
-                  }}
-                  className="ml-auto text-xs bg-red-900/50 px-3 py-1.5 rounded border border-red-800 hover:bg-red-900/70"
-                >
-                  Try Again
-                </button>
-              </div>
-            )}
-
-            <ResultsPanel
-              originalImage={originalImage || ''}
-              processedImage={processedImage}
-              analysis={analysis}
-              generatedRedesigns={generatedRedesigns}
-              stage={stage}
-              onImageClick={handleRedesignClick}
-            />
-
-            {stage === ProcessStage.COMPLETE && (
-              <div className="mt-8 flex justify-center">
-                <button
-                  onClick={() => {
-                    setStage(ProcessStage.IDLE);
-                    setOriginalImage(null);
-                    setProcessedImage(null);
-                    setRedesigns(null);
-                    setError(null);
-                  }}
-                  className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-full border border-slate-700 flex items-center"
-                >
-                  <RefreshCw className="w-4 h-4 mr-2" />
-                  Start New Design
-                </button>
-              </div>
-            )}
-          </>
-        )}
-
-      </main>
-
-      <HistorySidebar
-        isOpen={isHistoryOpen}
-        onClose={() => setIsHistoryOpen(false)}
-        history={history}
-        onSelect={handleLoadHistory}
-        onDelete={handleDeleteHistory}
-      />
-
-      <ApiKeyModal
-        isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        onSave={handleSaveKeys}
-      />
-
-      {generatedRedesigns && selectedRedesignIndex !== null && (
-        <RedesignDetailModal
-          isOpen={isDetailModalOpen}
-          onClose={() => setIsDetailModalOpen(false)}
-          imageUrl={generatedRedesigns[selectedRedesignIndex]}
-          onRemix={handleRemix}
-          onRemoveBackground={handleRemoveBackground}
-          onSplit={handleSplit}
-          onGenerateMockup={handleGenerateMockup}
-          onUpdateImage={handleUpdateRedesign}
-          isRemixing={isRemixing}
-          onUndo={() => handleUndoRedesign(selectedRedesignIndex)}
-          canUndo={(redesignHistory[selectedRedesignIndex]?.length || 0) > 0}
-        />
-      )}
+      </div>
     </div>
   );
 }
