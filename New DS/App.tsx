@@ -7,7 +7,7 @@ import { RedesignDetailModal } from './components/RedesignDetailModal';
 import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, detectAndSplitCharacters, generateRandomMockup } from './services/geminiService';
 import { sendDataToSheet } from './services/googleSheetService';
 import { ProductAnalysis, ProcessStage, PRODUCT_TYPES, HistoryItem, DesignMode, RopeType } from './types';
-import { AlertCircle, RefreshCw, Layers, Eraser, Sparkles, Zap, Package, Wand2, Paintbrush, AlertTriangle } from 'lucide-react';
+import { AlertCircle, RefreshCw, Layers, Eraser, Sparkles, Zap, Package, Wand2, Paintbrush, AlertTriangle, Crown } from 'lucide-react';
 
 function App() {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -311,9 +311,9 @@ function App() {
       <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30 relative">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center text-xs text-slate-400">
-             <div className="flex items-center bg-indigo-900/30 text-indigo-300 px-3 py-1.5 rounded-full border border-indigo-800">
-                  <Zap className="w-3.5 h-3.5 mr-1.5" />
-                  <span className="font-medium">Vercel Environment</span>
+             <div className="flex items-center bg-amber-950/30 text-amber-300 px-3 py-1.5 rounded-full border border-amber-800/50">
+                  <Crown className="w-3.5 h-3.5 mr-1.5" />
+                  <span className="font-bold">Team3T Pro Keys (Paid Billing)</span>
              </div>
           </div>
         </div>
