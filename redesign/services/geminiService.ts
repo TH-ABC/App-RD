@@ -1,77 +1,79 @@
-//
-// geminiService.ts (Dạng B - dùng backend proxy /api/generate)
-// -------------------------------------------------------------
-// Toàn bộ request đều đi qua backend → Không lộ token
-// Không còn gọi Google trực tiếp từ trình duyệt
-//
+// services/geminiService.ts (Dạng B — Frontend dùng Backend Proxy /api/generate)
+// Frontend KHÔNG gọi GoogleGenAI trực tiếp nữa. Mọi thứ đi qua backend.
 
-// Utility
-export const cleanJsonString = (text: string) => {
-  return text.replace(/```json\s*|\s*```/g, "").trim();
-};
-
-// --------------------------------------------
-// VALIDATE TOKEN
-// --------------------------------------------
-export const validateToken = async (): Promise<boolean> => {
-  try {
-    const res = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "validate" })
-    });
-
-    const data = await res.json();
-    return data.ok === true;
-  } catch (err) {
-    console.error("Validate token error:", err);
-    return false;
-  }
-};
-
-// --------------------------------------------
-// CLEANUP IMAGE (Remove Background, Enhance)
-// --------------------------------------------
-export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
+/* ---------------------------------------------------------
+   Helper chung để gọi /api/generate
+--------------------------------------------------------- */
+async function callApi(action: string, payload: any) {
   const res = await fetch("/api/generate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "cleanup",
-      image: imageBase64
-    })
+    body: JSON.stringify({ action, ...payload })
   });
 
-  const data = await res.json();
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`API /api/generate error (${res.status}): ${text}`);
+  }
+
+  // Giả định backend luôn trả JSON
+  return res.json();
+}
+
+/* ---------------------------------------------------------
+   1. setKeyPools — Dạng B không dùng nữa, để cho code cũ không lỗi import
+--------------------------------------------------------- */
+export const setKeyPools = (_free?: string[], _paid?: string[]) => {
+  // Không làm gì cả ở Dạng B
+  return;
+};
+
+/* ---------------------------------------------------------
+   2. Validate token (nếu cần)
+--------------------------------------------------------- */
+export const validateToken = async (): Promise<boolean> => {
+  const data = await callApi("validate", {});
+  return data.ok === true;
+};
+
+/* ---------------------------------------------------------
+   3. Cleanup product image (remove background, enhance)
+--------------------------------------------------------- */
+export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
+  const data = await callApi("cleanup", { image: imageBase64 });
+  // Backend trả về { result: "data:image/..." }
   return data.result;
 };
 
-// --------------------------------------------
-// ANALYZE PRODUCT IMAGE
-// --------------------------------------------
+/* ---------------------------------------------------------
+   4. Analyze product design
+--------------------------------------------------------- */
 export const analyzeProductDesign = async (
   imageBase64: string,
   productType: string,
   designMode: string
 ): Promise<any> => {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "analyze",
-      image: imageBase64,
-      productType,
-      designMode
-    })
+  const data = await callApi("analyze", {
+    image: imageBase64,
+    productType,
+    designMode
   });
-
-  const data = await res.json();
+  // Backend trả { result: {...ProductAnalysis} }
   return data.result;
 };
 
-// --------------------------------------------
-// GENERATE REDESIGNS (6 IMAGES)
-// --------------------------------------------
+/* ---------------------------------------------------------
+   5. Extract design elements (frames)
+--------------------------------------------------------- */
+export const extractDesignElements = async (imageBase64: string): Promise<string[]> => {
+  const data = await callApi("extract", { image: imageBase64 });
+  // Backend trả { results: [img1, img2, ...] }
+  return data.results || [];
+};
+
+/* ---------------------------------------------------------
+   6. Generate product redesigns (6 images)
+--------------------------------------------------------- */
 export const generateProductRedesigns = async (
   basePrompt: string,
   ropeType: string,
@@ -80,95 +82,51 @@ export const generateProductRedesigns = async (
   productType: string,
   useUltraFlag: boolean
 ): Promise<string[]> => {
-
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "redesign",
-      payload: {
-        basePrompt,
-        ropeType,
-        selectedComponents,
-        userNotes,
-        productType,
-        useUltraFlag
-      }
-    })
+  const data = await callApi("redesign", {
+    basePrompt,
+    ropeType,
+    selectedComponents,
+    userNotes,
+    productType,
+    useUltraFlag
   });
-
-  const data = await res.json();
+  // Backend trả { results: [img...] }
   return data.results || [];
 };
 
-// --------------------------------------------
-// EXTRACT DESIGN ELEMENTS
-// --------------------------------------------
-export const extractDesignElements = async (imageBase64: string): Promise<string[]> => {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "extract",
-      image: imageBase64
-    })
-  });
-
-  const data = await res.json();
-  return data.results || [];
-};
-
-// --------------------------------------------
-// REMIX IMAGE WITH INSTRUCTIONS
-// --------------------------------------------
+/* ---------------------------------------------------------
+   7. Remix product image theo instruction
+--------------------------------------------------------- */
 export const remixProductImage = async (
   imageBase64: string,
   instruction: string
 ): Promise<string> => {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "remix",
-      image: imageBase64,
-      instruction
-    })
+  const data = await callApi("remix", {
+    image: imageBase64,
+    instruction
   });
-
-  const data = await res.json();
+  // Backend trả { result: "data:image/..." }
   return data.result;
 };
 
-// --------------------------------------------
-// CHARACTER SPLIT
-// --------------------------------------------
-export const detectAndSplitCharacters = async (imageBase64: string): Promise<string[]> => {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "splitCharacters",
-      image: imageBase64
-    })
-  });
-
-  const data = await res.json();
+/* ---------------------------------------------------------
+   8. Detect & split characters
+--------------------------------------------------------- */
+export const detectAndSplitCharacters = async (
+  imageBase64: string
+): Promise<string[]> => {
+  const data = await callApi("splitCharacters", { image: imageBase64 });
+  // Backend trả { results: [img1, img2, ...] }
   return data.results || [];
 };
 
-// --------------------------------------------
-// GENERATE MOCKUP IMAGE
-// --------------------------------------------
-export const generateRandomMockup = async (imageBase64: string): Promise<string> => {
-  const res = await fetch("/api/generate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      action: "mockup",
-      image: imageBase64
-    })
-  });
-
-  const data = await res.json();
+/* ---------------------------------------------------------
+   9. Generate random mockup
+--------------------------------------------------------- */
+export const generateRandomMockup = async (
+  imageBase64: string
+): Promise<string> => {
+  const data = await callApi("mockup", { image: imageBase64 });
+  // Backend trả { result: "data:image/..." }
   return data.result;
 };
