@@ -13,7 +13,7 @@ export const cleanJsonString = (text: string) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Robust retry logic for API calls
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 2000): Promise<T> {
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 4000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
@@ -33,12 +33,21 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
     throw new Error("Operation failed after max retries");
 }
 
+// Initialize AI client with environment variable
+const getAiClient = () => {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey) {
+    throw new Error("API_KEY environment variable is not set.");
+  }
+  return new GoogleGenAI({ apiKey });
+};
+
 // --- EXPORTED SERVICES ---
 
 // 1. Cleanup
 export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
   return executeWithRetry(async () => {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = getAiClient();
       const prompt = "Isolate this product on a pure white background. Remove any wires, strings, or cluttered background elements. Keep the product itself exactly as is, high resolution, sharp details.";
 
       const response = await ai.models.generateContent({
@@ -69,7 +78,8 @@ export const analyzeProductDesign = async (
   ): Promise<ProductAnalysis> => {
     
     return executeWithRetry(async () => {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = getAiClient();
+        // Use 2.5 Flash for text analysis tasks
         const activeModel = 'gemini-2.5-flash';
 
         const isAutoDetect = productType === "Auto-Detect / Random";
@@ -139,7 +149,7 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
   for (const prompt of prompts) {
       try {
         const img = await executeWithRetry(async () => {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const ai = getAiClient();
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-image',
                 contents: {
@@ -158,7 +168,7 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
             return null;
         });
         if (img) results.push(img);
-        await sleep(500); // Gentle pacing
+        await sleep(1000); // Increased pacing for rate limits
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -205,10 +215,11 @@ export const generateProductRedesigns = async (
     const results: string[] = [];
     // Generate 6 images. Standard key might rate limit, so we proceed sequentially with retries.
     for(let i=0; i<6; i++) {
-        await sleep(500); // Stagger requests
+        // Increase delay to avoid 429 on free tier
+        await sleep(2000); 
         try {
             const img = await executeWithRetry(async () => {
-                 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+                 const ai = getAiClient();
                  
                  const response = await ai.models.generateContent({
                     model: 'gemini-2.5-flash-image',
@@ -235,7 +246,7 @@ export const remixProductImage = async (imageBase64: string, instruction: string
     const prompt = `Image Editor. Instruction: ${instruction}. Preserve Text spelling exactly.`;
     
     return executeWithRetry(async () => {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = getAiClient();
         
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
@@ -258,7 +269,7 @@ export const remixProductImage = async (imageBase64: string, instruction: string
 // 6. Split Characters
 export const detectAndSplitCharacters = async (imageBase64: string): Promise<string[]> => {
     return executeWithRetry(async () => {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = getAiClient();
 
         const identifyPrompt = "Analyze image. List the main distinct characters (humans, animals, snowmen) visible. Return a comma-separated list of their names/descriptions. Ignore small background elements.";
         
@@ -294,7 +305,7 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
                  if (part?.inlineData?.data) {
                      isolatedImages.push(`data:image/png;base64,${part.inlineData.data}`);
                  }
-                 await sleep(300);
+                 await sleep(1000); // Increased wait
              } catch (e) { console.error(`Failed to split ${charName}`, e); }
         }
         
@@ -305,7 +316,7 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
 // 7. Random Mockup
 export const generateRandomMockup = async (imageBase64: string): Promise<string> => {
     return executeWithRetry(async () => {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = getAiClient();
         
         const prompt = `Image Editor. 
         Action: Place this isolated object into a professional Print-on-Demand (POD) product photography setting.
