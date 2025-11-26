@@ -13,20 +13,38 @@ export const cleanJsonString = (text: string) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Robust retry logic for API calls
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 4000): Promise<T> {
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 5000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
             return await operation();
         } catch (error: any) {
-            const isRateLimit = error?.status === 429 || error?.code === 429 || (error?.message && (error.message.includes('429') || error.message.includes('quota')));
+            // Check for Rate Limit (429) or Quota Exhausted
+            const isRateLimit = error?.status === 429 || error?.code === 429 || 
+                               (error?.message && (error.message.includes('429') || error.message.includes('quota') || error.message.includes('exhausted')));
             
+            // Check for Model Not Found (404) - Do not retry
+            const isNotFound = error?.status === 404 || (error?.message && error.message.includes('404'));
+            if (isNotFound) {
+                console.error("Model not found. Please check usage.", error);
+                throw new Error("AI Model not found or deprecated. Please check configuration.");
+            }
+
             if (isRateLimit && i < retries - 1) {
                 console.warn(`Rate limit hit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
                 await sleep(currentDelay);
                 currentDelay *= 2; // Exponential backoff
                 continue;
             }
+            
+            // If it's a 503 (Service Unavailable), also retry
+            const isServiceUnavailable = error?.status === 503;
+            if (isServiceUnavailable && i < retries - 1) {
+                 console.warn(`Service unavailable. Retrying in ${currentDelay}ms...`);
+                 await sleep(currentDelay);
+                 continue;
+            }
+
             throw error;
         }
     }
@@ -37,7 +55,7 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
 const getAiClient = () => {
   const apiKey = process.env.API_KEY;
   if (!apiKey) {
-    throw new Error("API_KEY environment variable is not set.");
+    throw new Error("API_KEY environment variable is not set. Please configure it in your Vercel project settings.");
   }
   return new GoogleGenAI({ apiKey });
 };
@@ -168,7 +186,8 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
             return null;
         });
         if (img) results.push(img);
-        await sleep(1000); // Increased pacing for rate limits
+        // Significantly increased delay to avoid 429 on Vercel/Free tier
+        await sleep(3500); 
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -213,10 +232,10 @@ export const generateProductRedesigns = async (
 
 
     const results: string[] = [];
-    // Generate 6 images. Standard key might rate limit, so we proceed sequentially with retries.
+    // Generate 6 images sequentially to handle rate limits
     for(let i=0; i<6; i++) {
-        // Increase delay to avoid 429 on free tier
-        await sleep(2000); 
+        // High delay to prevent Quota Exhausted errors
+        await sleep(4500); 
         try {
             const img = await executeWithRetry(async () => {
                  const ai = getAiClient();
@@ -290,6 +309,7 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
         
         // Sequential generation to be safe
         for (const charName of characterList.slice(0, 4)) {
+             await sleep(3500); // Increased wait
              try {
                  const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
                  const resp = await ai.models.generateContent({
@@ -305,7 +325,6 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
                  if (part?.inlineData?.data) {
                      isolatedImages.push(`data:image/png;base64,${part.inlineData.data}`);
                  }
-                 await sleep(1000); // Increased wait
              } catch (e) { console.error(`Failed to split ${charName}`, e); }
         }
         
