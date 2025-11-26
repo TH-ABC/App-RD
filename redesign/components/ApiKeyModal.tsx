@@ -1,7 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
 import { X, CheckCircle, AlertCircle, Layers, CreditCard, Zap, Trash2, FileJson, User } from 'lucide-react';
-import { validateToken } from '../services/geminiService';
 
 interface ApiKeyModalProps {
   isOpen: boolean;
