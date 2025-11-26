@@ -1,7 +1,7 @@
 import React from 'react';
 
 // This component is obsolete as API keys are managed via Environment Variables.
-// It is kept as a stub to prevent import errors if still referenced.
+// It is kept as a stub to prevent build errors if referenced elsewhere.
 
 interface ApiKeyModalProps {
   isOpen: boolean;
@@ -10,7 +10,5 @@ interface ApiKeyModalProps {
 }
 
 export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ isOpen, onClose }) => {
-  if (!isOpen) return null;
-  
   return null; 
 };
