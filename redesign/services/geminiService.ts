@@ -1,119 +1,224 @@
-// pages/api/generate.ts
-import type { NextApiRequest, NextApiResponse } from "next";
+// services/geminiService.ts
+//---------------------------------------------------------
+// FINAL VERSION — Tất cả yêu cầu đều đi qua /api/generate
+// Không gọi Google API trực tiếp → Không lộ API key
+//---------------------------------------------------------
 
-export const config = {
-  api: {
-    bodyParser: {
-      sizeLimit: "15mb", // cho phép nhận hình lớn
-    },
-  },
-};
+let freePool: string[] = [];
+let paidPool: string[] = [];
+let freeIndex = 0;
+let paidIndex = 0;
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method Not Allowed" });
+//---------------------------------------------------------
+// KEY POOL (UI ONLY) — có thể có hoặc không
+//---------------------------------------------------------
+export function setKeyPools(free: string[], paid: string[]) {
+  freePool = free;
+  paidPool = paid;
+  freeIndex = 0;
+  paidIndex = 0;
+
+  console.log(`🔑 Key Pool Loaded → ${free.length} Free, ${paid.length} Paid`);
+}
+
+function getNextUserKey(): string | null {
+  if (paidPool.length > 0) {
+    const key = paidPool[paidIndex % paidPool.length];
+    paidIndex++;
+    return key;
   }
+  if (freePool.length > 0) {
+    const key = freePool[freeIndex % freePool.length];
+    freeIndex++;
+    return key;
+  }
+  return null;
+}
 
+//---------------------------------------------------------
+// BACKEND WRAPPER
+//---------------------------------------------------------
+async function callBackend(prompt: string, imageBase64?: string) {
   try {
-    const { action, prompt, image, userKey } = req.body as {
-      action?: string;
-      prompt?: string;
-      image?: string;
-      userKey?: string;
-    };
+    const body: any = { prompt };
 
-    // ⚠️ Check cơ bản: phải có prompt hoặc image
-    if (!prompt && !image) {
-      return res.status(400).json({ error: "Missing prompt or image" });
-    }
+    // hình (nếu có)
+    if (imageBase64) body.image = imageBase64;
 
-    // 🔑 Chọn key: ưu tiên GEMINI_API_KEY trên server
-    const apiKey = process.env.GEMINI_API_KEY || userKey;
+    // key pool (optional)
+    const userKey = getNextUserKey();
+    if (userKey) body.userKey = userKey;
 
-    if (!apiKey) {
-      return res
-        .status(400)
-        .json({ error: "Missing GEMINI_API_KEY (or userKey) environment variable" });
-    }
-
-    // Bạn đang dùng GEMINI TEXT+IMAGE MODEL → gemini-2.0-flash
-    const apiURL =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
-
-    // ---- BUILD PAYLOAD CHUNG ----
-    const payload: any = {
-      contents: [
-        {
-          parts: [],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.8,
-        topP: 0.95,
-        topK: 40,
-      },
-    };
-
-    // 1) TEXT PROMPT (mọi action đều dùng)
-    if (prompt) {
-      payload.contents[0].parts.push({ text: prompt });
-    }
-
-    // 2) IMAGE INPUT (cho cleanup / remix / mockup / analyze / extract / splitCharacters)
-    if (image) {
-      payload.contents[0].parts.push({
-        inlineData: {
-          data: image.replace(/^data:image\/\w+;base64,/, ""),
-          mimeType: "image/png",
-        },
-      });
-    }
-
-    // (Optional) Tuning theo action – cho đẹp, không bắt buộc
-    if (action === "analyze" || action === "extract" || action === "splitCharacters") {
-      payload.generationConfig.temperature = 0.2; // ổn định hơn cho JSON
-    }
-
-    // ---- CALL GOOGLE API ----
-    const googleRes = await fetch(`${apiURL}?key=${apiKey}`, {
+    const res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
 
-    const json = await googleRes.json();
+    const json = await res.json();
 
-    // Nếu Google trả lỗi
-    if (!googleRes.ok || json.error) {
-      console.error("Google API ERROR:", json.error || json);
-      return res.status(400).json({
-        error:
-          json.error?.message || json.error || "Google API error. Check quota / key / model.",
-      });
+    if (!res.ok) {
+      throw new Error(json.error || "Backend failed");
     }
 
-    // ---- PARSE IMAGE (nếu model trả base64 trong text) ----
-    let base64Image: string | null = null;
-
-    try {
-      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const match = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
-      if (match) {
-        base64Image = match[0];
-      }
-    } catch (e) {
-      // không sao, có thể action đó chỉ trả JSON chứ không có image
-    }
-
-    // ---- TRẢ VỀ CHO FRONTEND ----
-    return res.status(200).json({
-      ok: true,
-      image: base64Image,
-      raw: json,
-      action: action || null,
-    });
-  } catch (err: any) {
-    console.error("SERVER ERROR:", err);
-    return res.status(500).json({ error: err.message || "Server Error" });
+    return json;
+  } catch (err) {
+    console.error("⛔ Backend call failed:", err);
+    throw err;
   }
+}
+
+//---------------------------------------------------------
+// 1️⃣ CLEANUP — REMOVE BACKGROUND
+//---------------------------------------------------------
+export async function cleanupProductImage(imageBase64: string): Promise<string> {
+  const prompt =
+    "Remove background, isolate subject, clean edges, return PNG base64 only.";
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
+}
+
+//---------------------------------------------------------
+// 2️⃣ ANALYZE PRODUCT IMAGE
+//---------------------------------------------------------
+export async function analyzeProductDesign(
+  imageBase64: string,
+  productType: string,
+  designMode: any
+) {
+  const prompt = `
+You are a senior product design analyzer.
+Analyze the uploaded product and return ONLY JSON:
+{
+  "title": "",
+  "description": "",
+  "redesignPrompt": "",
+  "detectedComponents": [],
+  "detectedType": "",
+  "strategy": ""
+}
+
+Product Type: ${productType}
+Design Mode: ${designMode}
+Return JSON only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    return JSON.parse(text);
+  } catch {
+    console.warn("⚠️ JSON parse fail → returning fallback");
+    return {
+      title: "Unknown Product",
+      description: "",
+      redesignPrompt: "Create a modern refined redesign.",
+      detectedComponents: [],
+      detectedType: productType,
+      strategy: "basic",
+    };
+  }
+}
+
+//---------------------------------------------------------
+// 3️⃣ EXTRACT ELEMENTS
+//---------------------------------------------------------
+export async function extractDesignElements(imageBase64: string) {
+  const prompt = `
+Extract all key visual elements (patterns, colors, shapes, icons).
+Return JSON array only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
+    return JSON.parse(text);
+  } catch {
+    return [];
+  }
+}
+
+//---------------------------------------------------------
+// 4️⃣ GENERATE PRODUCT REDESIGNS (6 image)
+//---------------------------------------------------------
+export async function generateProductRedesigns(
+  redesignPrompt: string,
+  ropeType: any,
+  extraRefs: string[],
+  override: string,
+  productType: string,
+  useUltra?: boolean
+) {
+  const prompt = `
+Using the following design brief:
+${redesignPrompt}
+
+Generate 6 unique product redesigns.
+Return ONLY PNG base64 outputs.
+Each output must be separated clearly.
+`;
+
+  const result = await callBackend(prompt);
+
+  const rawText =
+    result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+  // extract tất cả hình trả về theo dạng base64
+  const matches = rawText.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/g);
+
+  return matches || [];
+}
+
+//---------------------------------------------------------
+// 5️⃣ REMIX PRODUCT IMAGE
+//---------------------------------------------------------
+export async function remixProductImage(
+  imageBase64: string,
+  instruction: string
+) {
+  const prompt = `
+Modify the uploaded image with these instructions:
+${instruction}
+
+Return PNG base64 only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
+}
+
+//---------------------------------------------------------
+// 6️⃣ SPLIT MULTIPLE CHARACTERS / OBJECTS
+//---------------------------------------------------------
+export async function detectAndSplitCharacters(imageBase64: string) {
+  const prompt = `
+Detect distinct objects/characters in the image.
+Crop each one individually.
+Return JSON array of PNG base64.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+
+  try {
+    const text = result.raw?.candidates?.[0]?.content?.parts?.[0]?.text || "[]";
+    return JSON.parse(text);
+  } catch {
+    return [];
+  }
+}
+
+//---------------------------------------------------------
+// 7️⃣ GENERATE MOCKUP
+//---------------------------------------------------------
+export async function generateRandomMockup(imageBase64: string) {
+  const prompt = `
+Place this product into a premium mockup scene.
+Return PNG base64 only.
+`;
+
+  const result = await callBackend(prompt, imageBase64);
+  return result.image;
 }
