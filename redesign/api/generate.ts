@@ -1,9 +1,3 @@
-// /pages/api/generate.ts  (Next.js)
-//-----------------------------------------------------------
-// BACKEND OFFICIAL FOR PRODUCT PERFECT
-// Hỗ trợ mọi action từ geminiService.ts
-//-----------------------------------------------------------
-
 import type { NextApiRequest, NextApiResponse } from "next";
 
 export const config = {
@@ -14,8 +8,7 @@ export const config = {
   },
 };
 
-// Google API endpoint
-const API_URL =
+const GOOGLE_URL =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
@@ -23,94 +16,149 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: "Method Not Allowed" });
   }
 
-  const { action, prompt, image, userKey } = req.body;
-
-  // chọn key: ưu tiên key người dùng → sau đó GEMINI_API_KEY trong Vercel
-  const apiKey = userKey || process.env.GEMINI_API_KEY;
-
-  if (!apiKey) {
-    return res.status(400).json({ error: "Missing GEMINI_API_KEY" });
-  }
-
-  //-----------------------------------------------------------
-  // BUILD PROMPT THEO ACTION
-  //-----------------------------------------------------------
-  let parts: any[] = [];
-
-  if (prompt) {
-    parts.push({ text: prompt });
-  }
-
-  if (image) {
-    parts.push({
-      inlineData: {
-        data: image.replace(/^data:image\/\w+;base64,/, ""),
-        mimeType: "image/png",
-      },
-    });
-  }
-
-  const payload = {
-    contents: [{ parts }],
-    generationConfig: {
-      temperature: 0.8,
-      topK: 40,
-      topP: 0.95,
-    },
-  };
-
-  //-----------------------------------------------------------
-  // CALL GOOGLE API
-  //-----------------------------------------------------------
-  let googleRes = await fetch(`${API_URL}?key=${apiKey}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await googleRes.json();
-
-  if (json.error) {
-    return res.status(400).json({ error: json.error.message, raw: json });
-  }
-
-  //-----------------------------------------------------------
-  // EXTRACT RESPONSES TÙY THEO ACTION
-  //-----------------------------------------------------------
   try {
-    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const { action, prompt, image, userKey } = req.body;
 
-    // 1) cleanup / remix / mockup → trả 1 image
-    if (["cleanup", "remix", "mockup"].includes(action)) {
-      const match = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
-      return res.status(200).json({
-        ok: true,
-        image: match ? match[0] : null,
-        raw: json,
-      });
+    const apiKey = userKey || process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      return res.status(400).json({ error: "Missing GEMINI_API_KEY" });
     }
 
-    // 2) redesign → 6 images
+    // ----------------------------------------------------
+    // Helper: build request body
+    // ----------------------------------------------------
+    const buildPayload = () => {
+      const parts: any[] = [];
+      if (prompt) parts.push({ text: prompt });
+
+      if (image) {
+        parts.push({
+          inlineData: {
+            data: image.replace(/^data:image\/\w+;base64,/, ""),
+            mimeType: "image/png",
+          },
+        });
+      }
+
+      return {
+        contents: [{ parts }],
+        generationConfig: {
+          temperature: 0.8,
+          topP: 0.95,
+        },
+      };
+    };
+
+    // ----------------------------------------------------
+    // Helper: call Gemini
+    // ----------------------------------------------------
+    const callGemini = async () => {
+      const response = await fetch(`${GOOGLE_URL}?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildPayload()),
+      });
+
+      return await response.json();
+    };
+
+    // ----------------------------------------------------
+    // ACTIONS ROUTER
+    // ----------------------------------------------------
+    let raw = await callGemini();
+
+    if (raw.error) {
+      console.error("Gemini API Error:", raw.error);
+      return res.status(400).json({ error: raw.error.message });
+    }
+
+    const text =
+      raw?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    // ----------------------------------------------------
+    // 1️⃣ CLEANUP → return image
+    // ----------------------------------------------------
+    if (action === "cleanup") {
+      const match = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
+      return res.json({ ok: true, image: match ? match[0] : null, raw });
+    }
+
+    // ----------------------------------------------------
+    // 2️⃣ ANALYZE → return JSON
+    // ----------------------------------------------------
+    if (action === "analyze") {
+      try {
+        const json = JSON.parse(text);
+        return res.json({ ok: true, raw, ...json });
+      } catch {
+        return res.json({
+          ok: true,
+          raw,
+          title: "",
+          description: "",
+          redesignPrompt: "Create an improved redesign.",
+          detectedComponents: [],
+          detectedType: "",
+          strategy: "basic",
+        });
+      }
+    }
+
+    // ----------------------------------------------------
+    // 3️⃣ EXTRACT ELEMENTS → return array
+    // ----------------------------------------------------
+    if (action === "extract") {
+      try {
+        const arr = JSON.parse(text);
+        return res.json({ ok: true, raw, elements: arr });
+      } catch {
+        return res.json({ ok: true, raw, elements: [] });
+      }
+    }
+
+    // ----------------------------------------------------
+    // 4️⃣ REDESIGN → extract 6 PNG images
+    // ----------------------------------------------------
     if (action === "redesign") {
       const matches = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/g);
-      return res.status(200).json({
-        ok: true,
-        images: matches || [],
-        raw: json,
-      });
+      return res.json({ ok: true, raw, images: matches || [] });
     }
 
-    // 3) analyze / extract / splitCharacters → JSON
-    if (["analyze", "extract", "splitCharacters"].includes(action)) {
-      return res.status(200).json({
-        ok: true,
-        raw,
-        json,
-      });
+    // ----------------------------------------------------
+    // 5️⃣ REMIX → return 1 PNG
+    // ----------------------------------------------------
+    if (action === "remix") {
+      const match = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
+      return res.json({ ok: true, raw, image: match ? match[0] : null });
     }
 
-    return res.status(200).json({ ok: true, raw: json });
-  } catch (e) {
-    return res.status(200).json({ ok: true, raw: json });
+    // ----------------------------------------------------
+    // 6️⃣ SPLIT CHARACTERS → return JSON array
+    // ----------------------------------------------------
+    if (action === "splitCharacters") {
+      try {
+        const arr = JSON.parse(text);
+        return res.json({ ok: true, raw, images: arr });
+      } catch {
+        return res.json({ ok: true, raw, images: [] });
+      }
+    }
+
+    // ----------------------------------------------------
+    // 7️⃣ MOCKUP → return 1 PNG
+    // ----------------------------------------------------
+    if (action === "mockup") {
+      const match = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
+      return res.json({ ok: true, raw, image: match ? match[0] : null });
+    }
+
+    // ----------------------------------------------------
+    // Default fallback
+    // ----------------------------------------------------
+    return res.json({ ok: true, raw, text });
+
+  } catch (err: any) {
+    console.error("SERVER ERROR:", err);
+    return res.status(500).json({ error: err.message });
   }
 }
