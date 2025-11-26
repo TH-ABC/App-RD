@@ -20,30 +20,29 @@ export default async function handler(
   }
 
   try {
-    const { prompt, image, userKey } = req.body;
+    const { prompt, image } = req.body;
 
     if (!prompt) {
       return res.status(400).json({ error: "Missing prompt" });
     }
 
-    // Determine API key priority: userKey > env
-    const apiKey = userKey || process.env.GEMINI_API_KEY;
+    // ❗ API KEY CHỈ LẤY TỪ VERCEL ENV
+    const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
-      return res.status(400).json({ 
-        error: "No API Keys configured. Please add your Gemini API key." 
+      return res.status(500).json({
+        error: "Server missing GEMINI_API_KEY in environment variables.",
       });
     }
 
-    // Build request payload
-    const parts: any[] = [];
-    parts.push({ text: prompt });
+    // Build payload
+    const parts: any[] = [{ text: prompt }];
 
     if (image) {
-      const base64Data = image.replace(/^data:image\/\w+;base64,/, "");
+      const base64 = image.replace(/^data:image\/\w+;base64,/, "");
       parts.push({
         inlineData: {
-          data: base64Data,
+          data: base64,
           mimeType: "image/png",
         },
       });
@@ -58,7 +57,7 @@ export default async function handler(
       },
     };
 
-    // Call Gemini API
+    // Call Gemini
     const response = await fetch(`${GOOGLE_URL}?key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -67,38 +66,38 @@ export default async function handler(
 
     const data = await response.json();
 
-    // Handle API errors
+    // Handle API Errors
     if (data.error) {
       console.error("Gemini API Error:", data.error);
-      
-      // Check for quota errors
-      if (data.error.code === 429 || data.error.message?.includes("quota")) {
-        return res.status(429).json({ 
-          error: "API quota exceeded. Please add more API keys or try again later." 
+
+      if (data.error.code === 429) {
+        return res.status(429).json({
+          error: "Gemini API Quota exceeded.",
         });
       }
-      
-      return res.status(400).json({ 
-        error: data.error.message || "Gemini API error" 
+
+      return res.status(400).json({
+        error: data.error.message || "Gemini API error",
       });
     }
 
-    // Extract text response
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    // Extract text
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
 
-    // Try to extract base64 image if present
+    // Detect embedded image
     const imageMatch = text.match(/data:image\/png;base64,[A-Za-z0-9+/=]+/);
 
-    return res.json({
+    return res.status(200).json({
       ok: true,
-      raw: data,
       text,
       image: imageMatch ? imageMatch[0] : null,
+      raw: data,
     });
   } catch (err: any) {
     console.error("SERVER ERROR:", err);
-    return res.status(500).json({ 
-      error: err.message || "Internal server error" 
+    return res.status(500).json({
+      error: err.message || "Internal server error",
     });
   }
 }
