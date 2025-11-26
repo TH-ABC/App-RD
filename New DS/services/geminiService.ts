@@ -13,7 +13,8 @@ export const cleanJsonString = (text: string) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Robust retry logic for API calls
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 5000): Promise<T> {
+// Increased default retries to 5 and initialDelay to 10s to handle "Quota exceeded... retry in 5.36s" errors reliably
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, initialDelay = 10000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
@@ -30,19 +31,14 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
                 throw new Error("AI Model not found or deprecated. Please check configuration.");
             }
 
-            if (isRateLimit && i < retries - 1) {
-                console.warn(`Rate limit hit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
+            // Also retry on 503 (Service Unavailable) or 500 (Internal Error) which can be transient
+            const isServerTransient = error?.status === 503 || error?.status === 500;
+
+            if ((isRateLimit || isServerTransient) && i < retries - 1) {
+                console.warn(`Rate limit/Transient error hit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
                 await sleep(currentDelay);
-                currentDelay *= 2; // Exponential backoff
+                currentDelay *= 2; // Exponential backoff (10s -> 20s -> 40s -> 80s)
                 continue;
-            }
-            
-            // If it's a 503 (Service Unavailable), also retry
-            const isServiceUnavailable = error?.status === 503;
-            if (isServiceUnavailable && i < retries - 1) {
-                 console.warn(`Service unavailable. Retrying in ${currentDelay}ms...`);
-                 await sleep(currentDelay);
-                 continue;
             }
 
             throw error;
@@ -186,8 +182,9 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
             return null;
         });
         if (img) results.push(img);
-        // Significantly increased delay to avoid 429 on Vercel/Free tier
-        await sleep(3500); 
+        
+        // Significantly increased delay to 7000ms to avoid 429 on Vercel/Free tier
+        await sleep(7000); 
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -234,8 +231,10 @@ export const generateProductRedesigns = async (
     const results: string[] = [];
     // Generate 6 images sequentially to handle rate limits
     for(let i=0; i<6; i++) {
-        // High delay to prevent Quota Exhausted errors
-        await sleep(4500); 
+        // High delay (10s) before each generation (including the first one, to buffer from previous steps)
+        // This ensures we stay well below 15 RPM (1 request every 4s)
+        await sleep(10000); 
+        
         try {
             const img = await executeWithRetry(async () => {
                  const ai = getAiClient();
@@ -307,9 +306,9 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
 
         const isolatedImages: string[] = [];
         
-        // Sequential generation to be safe
+        // Sequential generation with high safety delay
         for (const charName of characterList.slice(0, 4)) {
-             await sleep(3500); // Increased wait
+             await sleep(7000); // Increased wait
              try {
                  const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
                  const resp = await ai.models.generateContent({
