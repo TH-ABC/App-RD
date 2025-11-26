@@ -1,6 +1,34 @@
 import { GoogleGenAI } from "@google/genai";
 import { ProductAnalysis, DesignMode, RopeType, PRODUCT_MATERIALS } from "../types";
 
+// --- TOKEN NORMALIZER (MỚI) ---
+// Hỗ trợ 3 trường hợp:
+// 1) Dán JSON Ultra Token => tự bóc access_token
+// 2) Dán trực tiếp ya29... => giữ nguyên
+// 3) Dán API key AIza... => giữ nguyên
+function extractAccessToken(raw: string | undefined | null): string {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+
+  // Nếu là JSON Ultra Token
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed.access_token === "string") return parsed.access_token;
+      if (typeof parsed.token === "string") return parsed.token;
+      console.warn("Ultra Token JSON không có access_token/token");
+    } catch (e) {
+      console.warn("Parse Ultra Token JSON lỗi:", e);
+    }
+  }
+
+  // Nếu là OAuth token
+  if (trimmed.startsWith("ya29")) return trimmed;
+
+  // Ngược lại (AIza... hoặc chuỗi khác) trả nguyên
+  return trimmed;
+}
+
 // --- KEY MANAGER LOGIC ---
 class KeyManager {
   private freeKeys: string[] = [];
@@ -10,11 +38,12 @@ class KeyManager {
 
   // Store globally to persist across function calls
   setPools(free: string[], paid: string[]) {
-    this.freeKeys = free;
-    this.paidKeys = paid;
+    // Chuẩn hoá toàn bộ key khi lưu
+    this.freeKeys = free.map(k => extractAccessToken(k)).filter(Boolean);
+    this.paidKeys = paid.map(k => extractAccessToken(k)).filter(Boolean);
     this.freeIndex = 0;
     this.paidIndex = 0;
-    console.log(`Key Manager Initialized: ${free.length} Free, ${paid.length} Paid`);
+    console.log(`Key Manager Initialized: ${this.freeKeys.length} Free, ${this.paidKeys.length} Paid`);
   }
 
   hasKeys() {
@@ -27,7 +56,7 @@ class KeyManager {
   }
 
   getEnvKey() {
-      return process.env.API_KEY || process.env.GEMINI_API_KEY;
+    return extractAccessToken(process.env.API_KEY || process.env.GEMINI_API_KEY || "");
   }
 
   // Core rotation execution
@@ -95,23 +124,27 @@ class KeyManager {
 
 export const keyManager = new KeyManager();
 
-// --- CLIENT FACTORY ---
-const getClient = (key: string, isPaidKey: boolean = false) => {
-  if (!key) throw new Error("Missing Key");
+// --- CLIENT FACTORY (ĐÃ FIX HỖ TRỢ ULTRA JSON / YA29 / AIza) ---
+const getClient = (rawKey: string, isPaidKey: boolean = false) => {
+  if (!rawKey) throw new Error("Missing Key");
+
+  // Chuẩn hoá để hỗ trợ JSON / ya29 / AIza
+  const key = extractAccessToken(rawKey);
 
   // Ultra Token Strategy (OAuth2 - ya29...)
   if (key.startsWith('ya29')) {
     const customFetch = (url: RequestInfo | URL, init?: RequestInit) => {
-      const newInit = { ...init };
-      const newHeaders = new Headers(newInit.headers);
+      const newInit: RequestInit = { ...init };
+      const newHeaders = new Headers(newInit.headers || {});
       newHeaders.set('Authorization', `Bearer ${key}`);
+      // Đảm bảo không gửi x-goog-api-key khi dùng Bearer
       newHeaders.delete('x-goog-api-key');
       newInit.headers = newHeaders;
       return window.fetch(url, newInit);
     };
 
     return new GoogleGenAI({ 
-      apiKey: 'BEARER_TOKEN_MODE', 
+      apiKey: undefined,      // Không dùng apiKey khi chạy Bearer
       fetch: customFetch 
     } as any);
   }
