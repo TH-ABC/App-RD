@@ -3,7 +3,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 export const config = {
   api: {
     bodyParser: {
-      sizeLimit: "15mb",
+      sizeLimit: "15mb", // cho phép nhận hình lớn
     },
   },
 };
@@ -14,36 +14,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
 
   try {
-    const { prompt, image } = req.body;
+    const { prompt, image, mode } = req.body || {};
 
     if (!prompt && !image) {
       return res.status(400).json({ error: "Missing prompt or image" });
     }
 
-    const raw = process.env.ULTRA_TOKEN;
-    if (!raw) {
-      return res.status(400).json({ error: "ULTRA_TOKEN is missing" });
+    // Lấy API key từ env (ưu tiên GEMINI_API_KEY)
+    const apiKey =
+      process.env.GEMINI_API_KEY ||
+      process.env.API_KEY ||
+      process.env.ULTRA_TOKEN; // fallback nếu bạn vẫn dùng tên ULTRA_TOKEN
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: "Missing GEMINI_API_KEY / API_KEY / ULTRA_TOKEN environment variable",
+      });
     }
 
-    let accessToken = "";
-
-    try {
-      const parsed = JSON.parse(raw);
-      accessToken = parsed.access_token;
-    } catch (e) {
-      return res.status(400).json({ error: "Invalid ULTRA_TOKEN JSON format" });
-    }
-
-    if (!accessToken) {
-      return res.status(400).json({ error: "access_token missing in ULTRA_TOKEN" });
-    }
-
-    // API sử dụng Bearer (KHÔNG dùng ?key=)
+    // Model text + image ổn định (có thể đổi sang pro nếu bạn muốn)
     const apiURL =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-pro-exp:generateContent";
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent";
 
     const payload: any = {
-      contents: [{ parts: [] }],
+      contents: [
+        {
+          parts: [],
+        },
+      ],
       generationConfig: {
         temperature: 0.8,
         topP: 0.95,
@@ -68,30 +66,28 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${accessToken}`,
+        // Dùng API key dạng header, KHÔNG phải Bearer token
+        "x-goog-api-key": apiKey,
       },
       body: JSON.stringify(payload),
     });
 
     const json = await googleRes.json();
 
-    if (json.error) {
-      console.error("Google API ERROR:", json.error);
-      return res.status(400).json({ error: json.error.message });
+    // Nếu Google trả lỗi
+    if (!googleRes.ok) {
+      console.error("Google API ERROR:", json);
+      return res.status(400).json({
+        error:
+          json?.error?.message ||
+          `Upstream error: ${googleRes.status} ${googleRes.statusText}`,
+      });
     }
 
-    // Extract image
-    let base64Image = null;
-    try {
-      const text = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
-      const match = text.match(/data:image\/png;base64,([A-Za-z0-9+/=]+)/);
-      if (match) base64Image = match[0];
-    } catch (e) {}
-
+    // Trả raw data về cho frontend (frontend tự xử lý tiếp)
     return res.status(200).json({
       ok: true,
-      image: base64Image,
-      raw: json,
+      data: json,
     });
   } catch (err: any) {
     console.error("SERVER ERROR:", err);
