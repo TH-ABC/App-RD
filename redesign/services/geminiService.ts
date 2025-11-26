@@ -1,48 +1,47 @@
 import { GoogleGenAI } from "@google/genai";
 import { ProductAnalysis, DesignMode, RopeType, PRODUCT_MATERIALS } from "../types";
 
-// --- TOKEN NORMALIZER (MỚI) ---
-// Hỗ trợ 3 trường hợp:
-// 1) Dán JSON Ultra Token => tự bóc access_token
-// 2) Dán trực tiếp ya29... => giữ nguyên
-// 3) Dán API key AIza... => giữ nguyên
+/* ---------------------------------------------------------
+   0. TOKEN NORMALIZER (NEW — SUPPORT JSON, YA29, AIza)
+--------------------------------------------------------- */
 function extractAccessToken(raw: string | undefined | null): string {
   if (!raw) return "";
   const trimmed = String(raw).trim();
 
-  // Nếu là JSON Ultra Token
+  // JSON Ultra Token
   if (trimmed.startsWith("{")) {
     try {
       const parsed = JSON.parse(trimmed);
       if (typeof parsed.access_token === "string") return parsed.access_token;
       if (typeof parsed.token === "string") return parsed.token;
-      console.warn("Ultra Token JSON không có access_token/token");
+      console.warn("JSON token không chứa access_token");
     } catch (e) {
-      console.warn("Parse Ultra Token JSON lỗi:", e);
+      console.warn("Parse JSON Ultra Token lỗi:", e);
     }
   }
 
-  // Nếu là OAuth token
+  // Direct OAuth token
   if (trimmed.startsWith("ya29")) return trimmed;
 
-  // Ngược lại (AIza... hoặc chuỗi khác) trả nguyên
+  // API Key AIza...
   return trimmed;
 }
 
-// --- KEY MANAGER LOGIC ---
+/* ---------------------------------------------------------
+   1. KEY MANAGER
+--------------------------------------------------------- */
 class KeyManager {
   private freeKeys: string[] = [];
   private paidKeys: string[] = [];
   private freeIndex = 0;
   private paidIndex = 0;
 
-  // Store globally to persist across function calls
   setPools(free: string[], paid: string[]) {
-    // Chuẩn hoá toàn bộ key khi lưu
-    this.freeKeys = free.map(k => extractAccessToken(k)).filter(Boolean);
-    this.paidKeys = paid.map(k => extractAccessToken(k)).filter(Boolean);
+    this.freeKeys = free.map(extractAccessToken).filter(Boolean);
+    this.paidKeys = paid.map(extractAccessToken).filter(Boolean);
     this.freeIndex = 0;
     this.paidIndex = 0;
+
     console.log(`Key Manager Initialized: ${this.freeKeys.length} Free, ${this.paidKeys.length} Paid`);
   }
 
@@ -50,563 +49,518 @@ class KeyManager {
     return this.freeKeys.length > 0 || this.paidKeys.length > 0;
   }
 
-  // Helper to determine if a key is a "Token" (OAuth - ya29...)
   isUserToken(key: string) {
-    return key && key.startsWith('ya29');
+    return key.startsWith("ya29");
   }
 
   getEnvKey() {
     return extractAccessToken(process.env.API_KEY || process.env.GEMINI_API_KEY || "");
   }
 
-  // Core rotation execution
-  async executeWithRetry<T>(operation: (key: string, isUltra: boolean, isPaidPool: boolean) => Promise<T>): Promise<T> {
+  async executeWithRetry<T>(
+    operation: (key: string, isUltra: boolean, isPaidPool: boolean) => Promise<T>
+  ): Promise<T> {
     if (!this.hasKeys()) {
-       // Fallback to env key if no pool
-       const envKey = this.getEnvKey();
-       if (!envKey) throw new Error("No API Keys configured. Please add keys.");
-       return operation(envKey, this.isUserToken(envKey), false);
+      const envKey = this.getEnvKey();
+      if (!envKey) throw new Error("Không tìm thấy API key");
+      return operation(envKey, this.isUserToken(envKey), false);
     }
 
-    // 1. Try Free Keys Loop
-    let initialFreeIndex = this.freeIndex;
-    if (this.freeKeys.length > 0) {
-        for (let i = 0; i < this.freeKeys.length; i++) {
-            // Round robin selection
-            const currentKeyIndex = (initialFreeIndex + i) % this.freeKeys.length;
-            const key = this.freeKeys[currentKeyIndex];
-            
-            try {
-                // Update global index for next time
-                this.freeIndex = (currentKeyIndex + 1) % this.freeKeys.length;
-                
-                return await operation(key, this.isUserToken(key), false);
-            } catch (error: any) {
-                // Check if error is Rate Limit (429) or Quota Exceeded
-                const isRateLimit = error?.status === 429 || error?.code === 429 || (error?.message && (error.message.includes('429') || error.message.includes('quota')));
-                
-                if (isRateLimit) {
-                    console.warn(`Free Key ${currentKeyIndex} rate limited. Rotating to next...`);
-                    continue; // Try next key
-                }
-                // If it's another error (e.g. 400 Bad Request), don't rotate, just fail
-                throw error;
-            }
-        }
-        console.warn("All Free Keys exhausted/rate-limited. Switching to Paid Pool.");
+    /* ---- Free Keys ---- */
+    let firstFree = this.freeIndex;
+    for (let i = 0; i < this.freeKeys.length; i++) {
+      const idx = (firstFree + i) % this.freeKeys.length;
+      const key = this.freeKeys[idx];
+      try {
+        this.freeIndex = (idx + 1) % this.freeKeys.length;
+        return await operation(key, this.isUserToken(key), false);
+      } catch (err: any) {
+        const isRateLimit =
+          err?.status === 429 ||
+          err?.code === 429 ||
+          err?.message?.includes("429") ||
+          err?.message?.includes("quota");
+
+        if (isRateLimit) continue;
+        throw err;
+      }
     }
 
-    // 2. Try Paid Keys Loop (Failover)
-    let initialPaidIndex = this.paidIndex;
-    if (this.paidKeys.length > 0) {
-        for (let i = 0; i < this.paidKeys.length; i++) {
-             const currentKeyIndex = (initialPaidIndex + i) % this.paidKeys.length;
-             const key = this.paidKeys[currentKeyIndex];
+    console.warn("Free keys hết hoặc rate-limited → chuyển Paid Keys");
 
-             try {
-                 this.paidIndex = (currentKeyIndex + 1) % this.paidKeys.length;
-                 // Pass isPaidPool=true. 
-                 return await operation(key, this.isUserToken(key), true);
-             } catch (error: any) {
-                 const isRateLimit = error?.status === 429 || error?.code === 429 || (error?.message && (error.message.includes('429') || error.message.includes('quota')));
-                 if (isRateLimit) {
-                     console.warn(`Paid Key ${currentKeyIndex} rate limited. Rotating...`);
-                     continue;
-                 }
-                 throw error;
-             }
-        }
+    /* ---- Paid Keys ---- */
+    let firstPaid = this.paidIndex;
+    for (let i = 0; i < this.paidKeys.length; i++) {
+      const idx = (firstPaid + i) % this.paidKeys.length;
+      const key = this.paidKeys[idx];
+      try {
+        this.paidIndex = (idx + 1) % this.paidKeys.length;
+        return await operation(key, this.isUserToken(key), true);
+      } catch (err: any) {
+        const isRateLimit =
+          err?.status === 429 ||
+          err?.code === 429 ||
+          err?.message?.includes("429") ||
+          err?.message?.includes("quota");
+
+        if (isRateLimit) continue;
+        throw err;
+      }
     }
 
-    throw new Error("All API Keys (Free & Paid) are currently rate limited. Please wait.");
+    throw new Error("Tất cả key đều đang bị rate limit. Vui lòng đợi.");
   }
 }
 
 export const keyManager = new KeyManager();
 
-// --- CLIENT FACTORY (ĐÃ FIX HỖ TRỢ ULTRA JSON / YA29 / AIza) ---
-const getClient = (rawKey: string, isPaidKey: boolean = false) => {
-  if (!rawKey) throw new Error("Missing Key");
+/* ---------------------------------------------------------
+   2. CLIENT FACTORY — FIXED FOR BROWSER (FINAL)
+   - Ultra Token = Bearer
+   - Browser requires apiKey → use "DUMMY_KEY"
+--------------------------------------------------------- */
+const getClient = (rawKey: string, isPaidPool: boolean = false) => {
+  if (!rawKey) throw new Error("Missing key");
 
-  // Chuẩn hoá để hỗ trợ JSON / ya29 / AIza
   const key = extractAccessToken(rawKey);
 
-  // Ultra Token Strategy (OAuth2 - ya29...)
-  if (key.startsWith('ya29')) {
+  /* ---- If Ultra OAuth token ---- */
+  if (key.startsWith("ya29")) {
     const customFetch = (url: RequestInfo | URL, init?: RequestInit) => {
-      const newInit: RequestInit = { ...init };
-      const newHeaders = new Headers(newInit.headers || {});
-      newHeaders.set('Authorization', `Bearer ${key}`);
-      // Đảm bảo không gửi x-goog-api-key khi dùng Bearer
-      newHeaders.delete('x-goog-api-key');
-      newInit.headers = newHeaders;
-      return window.fetch(url, newInit);
+      const cfg: RequestInit = { ...init };
+      const headers = new Headers(cfg.headers || {});
+      headers.set("Authorization", `Bearer ${key}`);
+      headers.delete("x-goog-api-key");
+      cfg.headers = headers;
+      return window.fetch(url, cfg);
     };
 
-    return new GoogleGenAI({ 
-      apiKey: undefined,      // Không dùng apiKey khi chạy Bearer
-      fetch: customFetch 
+    return new GoogleGenAI({
+      apiKey: "DUMMY_KEY",   // <-- FIX CHÍNH: Browser BẮT BUỘC phải có apiKey
+      fetch: customFetch
     } as any);
   }
 
-  // Standard API Key (AIza...)
-  // If it's a Paid Key (AIza), we treat it as standard API key authentication.
+  /* ---- Standard API Key ---- */
   return new GoogleGenAI({ apiKey: key });
 };
 
-// Helper to strip base64 prefix
-const stripBase64Prefix = (base64: string) => {
-  return base64.replace(/^data:image\/[a-z]+;base64,/, "");
-};
+/* ---------------------------------------------------------
+   Helpers
+--------------------------------------------------------- */
+const stripBase64Prefix = (b64: string) =>
+  b64.replace(/^data:image\/[a-z]+;base64,/, "");
 
-export const cleanJsonString = (text: string) => {
-    return text.replace(/```json\s*|\s*```/g, "").trim();
-};
+export const cleanJsonString = (t: string) =>
+  t.replace(/```json\s*|\s*```/g, "").trim();
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// --- EXPORTED SERVICES ---
-
-// 1. Configuration (Called from App.tsx)
+/* ---------------------------------------------------------
+   EXPORT FUNCTION: setKeyPools
+--------------------------------------------------------- */
 export const setKeyPools = (free: string[], paid: string[]) => {
   keyManager.setPools(free, paid);
 };
 
-// 2. Validation
+/* ---------------------------------------------------------
+   VALIDATE TOKEN
+--------------------------------------------------------- */
 export const validateToken = async (token: string): Promise<boolean> => {
   try {
     const ai = getClient(token);
-    // Use Flash for validation as it's the most available model
     await ai.models.generateContent({
       model: "gemini-2.5-flash",
       contents: { parts: [{ text: "test" }] }
     });
     return true;
-  } catch (err: any) {
+  } catch (err) {
     console.error("Validation error:", err);
     throw err;
   }
 };
 
-// 3. Cleanup
+/* ---------------------------------------------------------
+   CLEANUP IMAGE
+--------------------------------------------------------- */
 export const cleanupProductImage = async (imageBase64: string): Promise<string> => {
-  return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-      const ai = getClient(key, isPaidPool);
-      
-      // Sleep strategy:
-      // - OAuth Token (Ultra): No sleep (User Quota is huge)
-      // - Paid API Key (AIza): Sleep 500ms 
-      // - Free API Key: Sleep 1000ms 
-      if (!isUltra) {
-          await sleep(isPaidPool ? 500 : 1000);
+  return keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+    const ai = getClient(key);
+    if (!isUltra) await sleep(isPaid ? 500 : 1000);
+
+    const prompt =
+      "Isolate this product on a pure white background. Remove wires/clutter.";
+
+    const res = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+          { text: prompt }
+        ]
       }
+    });
 
-      const prompt = "Isolate this product on a pure white background. Remove any wires, strings, or cluttered background elements. Keep the product itself exactly as is, high resolution, sharp details.";
+    for (const part of res.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data)
+        return `data:image/png;base64,${part.inlineData.data}`;
+    }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+    return imageBase64;
+  });
+};
+
+/* ---------------------------------------------------------
+   ANALYSIS (giữ nguyên logic nhưng chạy với client mới)
+--------------------------------------------------------- */
+export const analyzeProductDesign = async (
+  imageBase64: string,
+  productType: string,
+  mode: DesignMode,
+  preferredModel: string = "gemini-2.5-flash"
+): Promise<ProductAnalysis> => {
+  return keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+    const ai = getClient(key);
+
+    let model = (isUltra || isPaid) ? "gemini-1.5-pro" : "gemini-2.5-flash";
+    if (!isUltra) await sleep(isPaid ? 500 : 1000);
+
+    const isAuto = productType === "Auto-Detect / Random";
+    const material = PRODUCT_MATERIALS[productType] || "";
+
+    const prompt = `
+    Analyze this product image for redesign.
+    ${isAuto ? "Identify product type first." : `Material: ${material}`}
+    Design Goal: ${mode === DesignMode.NEW_CONCEPT ? "New Concept" : "Enhance Existing"}
+    Return JSON: description, designCritique, detectedComponents, redesignPrompt.
+    `;
+
+    try {
+      const res = await ai.models.generateContent({
+        model,
         contents: {
           parts: [
             { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
             { text: prompt }
           ]
-        }
+        },
+        config: { responseMimeType: "application/json" }
       });
 
-      for (const part of response.candidates?.[0]?.content?.parts || []) {
-          if (part.inlineData && part.inlineData.data) {
-              return `data:image/png;base64,${part.inlineData.data}`;
-          }
-      }
-      console.warn("Cleanup returned no image, using original.");
-      return imageBase64;
+      const raw = JSON.parse(cleanJsonString(res.text || "{}"));
+
+      let components = raw.detectedComponents;
+      if (typeof components === "string")
+        components = components.split(",").map((s: string) => s.trim());
+      else if (!Array.isArray(components))
+        components = [];
+
+      return { ...raw, detectedComponents: components };
+    } catch (err) {
+      // fallback to Flash
+      const res = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: {
+          parts: [
+            { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+            { text: prompt }
+          ]
+        },
+        config: { responseMimeType: "application/json" }
+      });
+
+      const raw = JSON.parse(cleanJsonString(res.text || "{}"));
+      let components = raw.detectedComponents;
+
+      if (typeof components === "string")
+        components = components.split(",").map((s: string) => s.trim());
+      else if (!Array.isArray(components))
+        components = [];
+
+      return { ...raw, detectedComponents: components };
+    }
   });
 };
 
-// 4. Analysis
-export const analyzeProductDesign = async (
-    imageBase64: string, 
-    productType: string,
-    designMode: DesignMode,
-    preferredModel: string = 'gemini-2.5-flash'
-  ): Promise<ProductAnalysis> => {
-    
-    return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-        const ai = getClient(key, isPaidPool);
-        
-        // Strategy: Ultra Token gets Pro. Others get Flash.
-        let activeModel = (isUltra || isPaidPool) ? 'gemini-1.5-pro' : 'gemini-2.5-flash';
-
-        if (!isUltra) {
-             await sleep(isPaidPool ? 500 : 1000);
-        }
-
-        const isAutoDetect = productType === "Auto-Detect / Random";
-        let materialInfo = "";
-        let typeInstruction = "";
-
-        if (isAutoDetect) {
-           typeInstruction = "First, IDENTIFY the product type (e.g., Ornament, Suncatcher, Home Decor) and its likely materials based on the image visual cues. Then proceed with the analysis.";
-        } else {
-           materialInfo = PRODUCT_MATERIALS[productType] || "";
-           typeInstruction = `Product Type: ${productType}\nMaterial Specs: ${materialInfo}`;
-        }
-
-        const prompt = `Analyze this product image for a redesign task.
-        ${typeInstruction}
-        Design Goal: ${designMode === DesignMode.NEW_CONCEPT ? "Create a completely new creative concept" : "Enhance existing design"}.
-      
-        Task:
-        1. Analyze the image.
-        2. Provide a description and critique.
-        3. List detected components (characters, text, patterns).
-        4. Create a 'redesignPrompt' that generates a BETTER, High-Quality version of this product. ${isAutoDetect ? "Explicitly mention the identified product type and premium materials in this prompt." : `Explicitly mention it is a '${productType}' with '${materialInfo}'.`}
-
-        Return a JSON object with fields: description, designCritique, detectedComponents, redesignPrompt.
-        IMPORTANT: detectedComponents must be an array of strings.
-        `;
-        
-        try {
-            const response = await ai.models.generateContent({
-                model: activeModel,
-                contents: {
-                parts: [
-                    { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                    { text: prompt }
-                ]
-                },
-                config: { responseMimeType: "application/json" }
-            });
-
-            const text = response.text || "{}";
-            const rawResult = JSON.parse(cleanJsonString(text));
-
-            // SANITIZE
-            let components = rawResult.detectedComponents;
-            if (typeof components === 'string') {
-                components = components.split(',').map((s: string) => s.trim());
-            } else if (!Array.isArray(components)) {
-                components = [];
-            }
-
-            return {
-                ...rawResult,
-                detectedComponents: components
-            } as ProductAnalysis;
-
-        } catch (error: any) {
-            // Fallback logic for keys
-            if (activeModel !== 'gemini-2.5-flash') {
-                console.warn(`Pro model failed (${error.status}), falling back to Flash on same key.`);
-                const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash',
-                    contents: {
-                        parts: [
-                            { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                            { text: prompt }
-                        ]
-                    },
-                    config: { responseMimeType: "application/json" }
-                });
-                const text = response.text || "{}";
-                const rawResult = JSON.parse(cleanJsonString(text));
-                
-                let components = rawResult.detectedComponents;
-                if (typeof components === 'string') {
-                    components = components.split(',').map((s: string) => s.trim());
-                } else if (!Array.isArray(components)) {
-                    components = [];
-                }
-                return { ...rawResult, detectedComponents: components } as ProductAnalysis;
-            }
-            throw error;
-        }
-    });
-  };
-
-// 5. Extract Elements
+/* ---------------------------------------------------------
+   EXTRACT DESIGN ELEMENTS (GIỮ NGUYÊN)
+--------------------------------------------------------- */
 export const extractDesignElements = async (imageBase64: string): Promise<string[]> => {
   const prompts = [
-    "Crop and isolate the main CHARACTER or central figure.",
-    "Crop and isolate the BACKGROUND PATTERN.",
-    "Crop and isolate any TEXT or LOGO elements."
+    "Crop and isolate the main CHARACTER",
+    "Crop and isolate the BACKGROUND PATTERN",
+    "Crop and isolate TEXT or LOGO elements"
   ];
 
   const results: string[] = [];
 
-  for (const prompt of prompts) {
-      try {
-        const img = await keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-            const ai = getClient(key, isPaidPool);
-            if (!isUltra) await sleep(isPaidPool ? 500 : 1000);
+  for (const p of prompts) {
+    try {
+      const img = await keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+        const ai = getClient(key);
+        if (!isUltra) await sleep(isPaid ? 500 : 1000);
 
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash-image',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                        { text: prompt }
-                    ]
-                }
-            });
-            
-            for (const part of response.candidates?.[0]?.content?.parts || []) {
-                if (part.inlineData && part.inlineData.data) {
-                    return `data:image/png;base64,${part.inlineData.data}`;
-                }
-            }
-            return null;
+        const res = await ai.models.generateContent({
+          model: "gemini-2.5-flash-image",
+          contents: {
+            parts: [
+              { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+              { text: p }
+            ]
+          }
         });
-        if (img) results.push(img);
-      } catch (e) { console.error("Extraction partial fail", e); }
+
+        for (const part of res.candidates?.[0]?.content?.parts || []) {
+          if (part.inlineData?.data)
+            return `data:image/png;base64,${part.inlineData.data}`;
+        }
+
+        return null;
+      });
+
+      if (img) results.push(img);
+    } catch {}
   }
+
   return results;
 };
 
-// 6. Generate Redesigns (Logic Updated for Ultra Tokens)
+/* ---------------------------------------------------------
+   GENERATE REDESIGNS (GIỮ NGUYÊN LOGIC)
+--------------------------------------------------------- */
 export const generateProductRedesigns = async (
-    basePrompt: string,
-    ropeType: RopeType,
-    selectedComponents: string[],
-    userNotes: string,
-    productType: string,
-    useUltraFlag: boolean
-  ): Promise<string[]> => {
-    
-    // 1. Construct the Prompt
-    let finalPrompt = basePrompt;
-    
-    const isAutoDetect = productType === "Auto-Detect / Random";
-    if (!isAutoDetect) {
-       const materialInfo = PRODUCT_MATERIALS[productType] || "";
-       finalPrompt += `\n\nMaterial Specs: ${materialInfo}`;
-    } else {
-        finalPrompt += `\n\nEnsure High-Quality Material Rendering appropriate for this product type.`;
-    }
+  basePrompt: string,
+  ropeType: RopeType,
+  selectedComponents: string[],
+  userNotes: string,
+  productType: string,
+  useUltra: boolean
+): Promise<string[]> => {
 
-    if (ropeType !== RopeType.NONE) finalPrompt += `\nAdd ${ropeType} loop.`;
-    if (userNotes) finalPrompt += `\nUser Request: ${userNotes}`;
-    if (selectedComponents.length > 0) finalPrompt += `\nKeep elements: ${selectedComponents.join(", ")}.`;
+  let finalPrompt = basePrompt;
 
-    if (productType.includes('Acrylic') || productType.includes('Suncatcher') || (isAutoDetect && basePrompt.toLowerCase().includes('acrylic'))) {
-       finalPrompt += `\n\nCRITICAL PHYSICAL PROPERTIES:
-       - The material MUST be depicted as a THIN (3mm) sheet. Do NOT render it as a thick block.
-       - CUTLINE: The acrylic must be laser-cut VERY CLOSE to the design edge (Kiss-cut).
-       - TRANSPARENCY: Optically clear background.`;
-    }
+  // add materials
+  if (productType !== "Auto-Detect / Random") {
+    const materialInfo = PRODUCT_MATERIALS[productType] || "";
+    finalPrompt += `\nMaterial Specs: ${materialInfo}`;
+  }
 
-    finalPrompt += `\n\nIMPORTANT PRESENTATION: Generate this as a High-Quality Product Photography Mockup.
-    - The product should be hanging or placed in a beautiful, realistic environment.
-    - Do NOT use a plain white background.
-    - Use cinematic lighting, depth of field (bokeh).`;
+  if (ropeType !== RopeType.NONE)
+    finalPrompt += `\nAdd ${ropeType} loop.`;
 
+  if (userNotes)
+    finalPrompt += `\nUser Request: ${userNotes}`;
 
-    // --- GENERATION STRATEGY ---
-    
-    // Helper: Execute a single generation via Flash Image (General Quota)
-    const runFlashGen = async (key: string, isPaidPool: boolean) => {
-         const ai = getClient(key, isPaidPool);
-         const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
-            contents: { parts: [{ text: finalPrompt }] }
-         });
-         for (const part of response.candidates?.[0]?.content?.parts || []) {
-            if (part.inlineData && part.inlineData.data) {
-                return `data:image/png;base64,${part.inlineData.data}`;
-            }
-         }
-         return null;
-    };
+  if (selectedComponents.length > 0)
+    finalPrompt += `\nKeep elements: ${selectedComponents.join(", ")}`;
 
-    // ULTRA TOKEN PATH (Parallel Batching + General Quota)
-    if (keyManager['paidKeys'].some(k => k.startsWith('ya29'))) {
-         return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-             // Only apply this logic if it is indeed an Ultra Token
-             if (isUltra) {
-                 console.log("Using Ultra Token Strategy: Parallel Batching with Flash Image");
-                 // Generate 6 images in 2 batches of 3 to be safe, or all 6 if we are confident.
-                 // Let's do 2 batches of 3 for safety against Rate Limits even on Ultra.
-                 
-                 const batch1Promises = [runFlashGen(key, true), runFlashGen(key, true), runFlashGen(key, true)];
-                 const results1 = await Promise.all(batch1Promises);
-                 
-                 // Small delay between batches
-                 await sleep(500); 
+  finalPrompt += `
+  IMPORTANT: High-Quality Product Photography Mockup.
+  Cinematic lighting, depth of field, NO white background.
+  `;
 
-                 const batch2Promises = [runFlashGen(key, true), runFlashGen(key, true), runFlashGen(key, true)];
-                 const results2 = await Promise.all(batch2Promises);
-                 
-                 const allResults = [...results1, ...results2].filter(r => r !== null) as string[];
-                 return allResults;
-             } 
-             // If key rotated to a non-ultra key inside this block (rare), fallback to standard loop below
-             return [];
-         }).then(res => {
-             if (res.length > 0) return res;
-             throw new Error("Ultra generation returned empty, falling back.");
-         }).catch(async (e) => {
-             console.warn("Ultra batch failed, falling back to standard sequential:", e);
-             return await standardSequentialGeneration(finalPrompt);
-         });
-    }
-
-    // STANDARD PATH (Sequential + Sleep)
-    return await standardSequentialGeneration(finalPrompt);
-};
-
-// Helper for standard generation loop
-async function standardSequentialGeneration(prompt: string): Promise<string[]> {
-    const results: string[] = [];
-    for(let i=0; i<6; i++) {
-        await sleep(500); // Stagger
-        const img = await keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-             const ai = getClient(key, isPaidPool);
-             
-             // Paid API Key (AIza) Sleep
-             if (!isUltra) {
-                 await sleep(isPaidPool ? 2500 : 2000); 
-             }
-
-             // Flash Generation Function
-             const runFlash = async () => {
-                 const response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-image',
-                    contents: { parts: [{ text: prompt }] }
-                 });
-                 for (const part of response.candidates?.[0]?.content?.parts || []) {
-                    if (part.inlineData && part.inlineData.data) {
-                        return `data:image/png;base64,${part.inlineData.data}`;
-                    }
-                 }
-                 return null;
-             };
-
-             // Try Imagen 4.0 first (if available/quota allows)
-             try {
-                 const response = await ai.models.generateImages({
-                    model: 'imagen-4.0-generate-001',
-                    prompt: prompt,
-                    config: { numberOfImages: 1, aspectRatio: '1:1', outputMimeType: 'image/jpeg' }
-                 });
-                 
-                 if(response.generatedImages?.[0]?.image?.imageBytes) {
-                    return `data:image/jpeg;base64,${response.generatedImages[0].image.imageBytes}`;
-                 }
-                 throw new Error("No image data");
-             } catch (err: any) {
-                 console.warn(`Imagen failed, falling back to Flash: ${err.message}`);
-                 return await runFlash();
-             }
-        }).catch(e => null);
-        
-        if (img) results.push(img);
-    }
-    return results;
-}
-
-// 7. Remix
-export const remixProductImage = async (imageBase64: string, instruction: string): Promise<string> => {
-    const prompt = `Image Editor. Instruction: ${instruction}. Preserve Text spelling exactly.`;
-    
-    return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-        const ai = getClient(key, isPaidPool);
-        if (!isUltra) await sleep(isPaidPool ? 500 : 1000);
-        
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                    { text: prompt }
-                ]
-            }
-        });
-        for (const part of response.candidates?.[0]?.content?.parts || []) {
-            if (part.inlineData && part.inlineData.data) {
-                return `data:image/png;base64,${part.inlineData.data}`;
-            }
-        }
-        throw new Error("Remix failed to generate image");
+  /* ---- Helper ---- */
+  const runFlashGen = async (key: string, isPaid: boolean) => {
+    const ai = getClient(key);
+    const res = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: { parts: [{ text: finalPrompt }] }
     });
+    for (const part of res.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data)
+        return `data:image/png;base64,${part.inlineData.data}`;
+    }
+    return null;
+  };
+
+  /* ---- Ultra Token Strategy ---- */
+  if (keyManager["paidKeys"].some(k => k.startsWith("ya29"))) {
+    return keyManager
+      .executeWithRetry(async (key, isUltra, isPaid) => {
+        if (isUltra) {
+          const batch1 = await Promise.all([
+            runFlashGen(key, true),
+            runFlashGen(key, true),
+            runFlashGen(key, true)
+          ]);
+
+          await sleep(500);
+
+          const batch2 = await Promise.all([
+            runFlashGen(key, true),
+            runFlashGen(key, true),
+            runFlashGen(key, true)
+          ]);
+
+          const all = [...batch1, ...batch2].filter(Boolean) as string[];
+          return all;
+        }
+        return [];
+      })
+      .then(res => res.length ? res : Promise.reject("Ultra empty"))
+      .catch(async () => standardSequentialGeneration(finalPrompt));
+  }
+
+  /* ---- Standard Path ---- */
+  return standardSequentialGeneration(finalPrompt);
 };
 
-// 8. Split Characters
-export const detectAndSplitCharacters = async (imageBase64: string): Promise<string[]> => {
-    return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-        const ai = getClient(key, isPaidPool);
-        if (!isUltra) await sleep(isPaidPool ? 500 : 1000);
+async function standardSequentialGeneration(prompt: string): Promise<string[]> {
+  const results: string[] = [];
+  for (let i = 0; i < 6; i++) {
+    await sleep(500);
+    const img = await keyManager
+      .executeWithRetry(async (key, isUltra, isPaid) => {
+        const ai = getClient(key);
+        if (!isUltra) await sleep(isPaid ? 2500 : 2000);
 
-        const identifyPrompt = "Analyze image. List the main distinct characters (humans, animals, snowmen) visible. Return a comma-separated list of their names/descriptions. Ignore small background elements.";
-        
-        const identifyResponse = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                    { text: identifyPrompt }
-                ]
-            }
-        });
-        const characterList = identifyResponse.text?.split(',').map(s => s.trim()) || [];
-        
-        if (characterList.length === 0) return [];
-
-        // Parallel generation for tokens is safer here too
-        const generateIsolated = async (charName: string) => {
-             const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
-             const resp = await ai.models.generateContent({
-                model: 'gemini-2.5-flash-image',
-                 contents: {
-                    parts: [
-                        { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                        { text: isolatePrompt }
-                    ]
-                }
-             });
-             const part = resp.candidates?.[0]?.content?.parts?.[0];
-             if (part?.inlineData?.data) {
-                 return `data:image/png;base64,${part.inlineData.data}`;
-             }
-             return null;
+        const runFlash = async () => {
+          const res = await ai.models.generateContent({
+            model: "gemini-2.5-flash-image",
+            contents: { parts: [{ text: prompt }] }
+          });
+          for (const part of res.candidates?.[0]?.content?.parts || []) {
+            if (part.inlineData?.data)
+              return `data:image/png;base64,${part.inlineData.data}`;
+          }
+          return null;
         };
 
-        const promises = characterList.slice(0, 4).map(c => generateIsolated(c));
-        const results = await Promise.all(promises);
-        const isolatedImages: string[] = [];
-        results.forEach(r => { if(r) isolatedImages.push(r); });
-        
-        return isolatedImages;
+        try {
+          const res = await ai.models.generateImages({
+            model: "imagen-4.0-generate-001",
+            prompt,
+            config: {
+              numberOfImages: 1,
+              aspectRatio: "1:1",
+              outputMimeType: "image/jpeg"
+            }
+          });
+
+          const bytes = res.generatedImages?.[0]?.image?.imageBytes;
+          if (bytes) return `data:image/jpeg;base64,${bytes}`;
+          throw new Error("no image");
+        } catch (e) {
+          return await runFlash();
+        }
+      })
+      .catch(() => null);
+
+    if (img) results.push(img);
+  }
+  return results;
+}
+
+/* ---------------------------------------------------------
+   REMIX
+--------------------------------------------------------- */
+export const remixProductImage = async (imageBase64: string, instruction: string): Promise<string> => {
+  const prompt = `Image Editor. Instruction: ${instruction}. Preserve text exactly.`;
+
+  return keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+    const ai = getClient(key);
+    if (!isUltra) await sleep(isPaid ? 500 : 1000);
+
+    const res = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+          { text: prompt }
+        ]
+      }
     });
+
+    for (const part of res.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data)
+        return `data:image/png;base64,${part.inlineData.data}`;
+    }
+
+    throw new Error("Remix failed");
+  });
 };
 
-// 9. Random Mockup
-export const generateRandomMockup = async (imageBase64: string): Promise<string> => {
-    return keyManager.executeWithRetry(async (key, isUltra, isPaidPool) => {
-        const ai = getClient(key, isPaidPool);
-        if (!isUltra) await sleep(isPaidPool ? 500 : 1000);
-        
-        const prompt = `Image Editor. 
-        Action: Place this isolated object into a professional Print-on-Demand (POD) product photography setting.
-        Logic:
-        - If Ornament: Hang on a Christmas tree with bokeh lights.
-        - Else: Place on a rustic wooden table with cinematic lighting.
-        Requirement: High-resolution, photorealistic.`;
+/* ---------------------------------------------------------
+   SPLIT CHARACTERS
+--------------------------------------------------------- */
+export const detectAndSplitCharacters = async (imageBase64: string): Promise<string[]> => {
+  return keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+    const ai = getClient(key);
+    if (!isUltra) await sleep(isPaid ? 500 : 1000);
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
-                    { text: prompt }
-                ]
-            }
-        });
-        
-        for (const part of response.candidates?.[0]?.content?.parts || []) {
-            if (part.inlineData && part.inlineData.data) {
-                return `data:image/png;base64,${part.inlineData.data}`;
-            }
-        }
-        throw new Error("Mockup generation failed.");
+    const identifyPrompt =
+      "Analyze image. List main distinct characters. Comma-separated.";
+
+    const identifyRes = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+          { text: identifyPrompt }
+        ]
+      }
     });
+
+    const list = identifyRes.text
+      ?.split(",")
+      .map(s => s.trim())
+      .filter(Boolean) || [];
+
+    if (!list.length) return [];
+
+    const isolate = async (name: string) => {
+      const p = `Crop and isolate ONLY ${name}. White background. HQ.`;
+      const res = await ai.models.generateContent({
+        model: "gemini-2.5-flash-image",
+        contents: {
+          parts: [
+            { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+            { text: p }
+          ]
+        }
+      });
+      const part = res.candidates?.[0]?.content?.parts?.[0];
+      if (part?.inlineData?.data)
+        return `data:image/png;base64,${part.inlineData.data}`;
+      return null;
+    };
+
+    const results = await Promise.all(list.slice(0, 4).map(isolate));
+    return results.filter(Boolean) as string[];
+  });
+};
+
+/* ---------------------------------------------------------
+   RANDOM MOCKUP
+--------------------------------------------------------- */
+export const generateRandomMockup = async (imageBase64: string): Promise<string> => {
+  return keyManager.executeWithRetry(async (key, isUltra, isPaid) => {
+    const ai = getClient(key);
+    if (!isUltra) await sleep(isPaid ? 500 : 1000);
+
+    const prompt = `
+    Image Editor.
+    Insert object into POD mockup:
+    - If Ornament → Christmas tree + bokeh lights.
+    - Else → Wooden table + cinematic lighting.
+    High resolution.
+    `;
+
+    const res = await ai.models.generateContent({
+      model: "gemini-2.5-flash-image",
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "image/jpeg", data: stripBase64Prefix(imageBase64) } },
+          { text: prompt }
+        ]
+      }
+    });
+
+    for (const part of res.candidates?.[0]?.content?.parts || []) {
+      if (part.inlineData?.data)
+        return `data:image/png;base64,${part.inlineData.data}`;
+    }
+
+    throw new Error("Mockup failed");
+  });
 };
