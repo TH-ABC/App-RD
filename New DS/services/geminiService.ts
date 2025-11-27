@@ -85,8 +85,8 @@ const getAiClient = () => {
 };
 
 // Robust retry logic for API calls
-// Increased retry count and delays to handle 429 errors gracefully
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 2000): Promise<T> {
+// Aggressively handles 429 errors for Free Tier stability
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, initialDelay = 4000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
@@ -112,16 +112,21 @@ async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, ini
             const isServerTransient = error?.status === 503 || error?.status === 500;
 
             if ((isRateLimit || isServerTransient) && i < retries - 1) {
-                console.warn(`Transient error/Rate Limit. Retrying in ${currentDelay}ms... (Attempt ${i + 1}/${retries})`);
-                await sleep(currentDelay);
-                currentDelay *= 2; 
+                // If Rate Limit, wait significantly longer (min 10s) to clear the bucket
+                const waitTime = isRateLimit ? Math.max(currentDelay, 10000) : currentDelay;
+                
+                console.warn(`Transient error/Rate Limit (${error.status || '429'}). Retrying in ${waitTime}ms... (Attempt ${i + 1}/${retries})`);
+                await sleep(waitTime);
+                
+                // Increase delay for next attempt
+                currentDelay = isRateLimit ? currentDelay * 1.5 : currentDelay * 2; 
                 continue;
             }
 
             throw error;
         }
     }
-    throw new Error("Operation failed after max retries");
+    throw new Error("Operation failed after max retries. Your API Key may be exhausted.");
 }
 
 // --- EXPORTED SERVICES ---
@@ -230,6 +235,9 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
 
   for (const prompt of prompts) {
       try {
+        // High throttle for sequential extractions
+        await sleep(2000);
+
         const img = await executeWithRetry(async () => {
             const ai = getAiClient();
             const response = await ai.models.generateContent({
@@ -251,8 +259,6 @@ export const extractDesignElements = async (imageBase64: string): Promise<string
         });
         if (img) results.push(img);
         
-        // Throttled delay to prevent 429
-        await sleep(1000); 
       } catch (e) { console.error("Extraction partial fail", e); }
   }
   return results;
@@ -297,11 +303,10 @@ export const generateProductRedesigns = async (
 
 
     const results: string[] = [];
-    // Generate 6 images sequentially with safe delays
+    // Generate 6 images sequentially with SAFE delays to prevent 429
     for(let i=0; i<6; i++) {
-        // Safe buffer to avoid hitting per-minute limits even with paid keys (burst protection)
-        // If you have 3 keys in ENV, this can be lower (e.g. 500ms), but 1000ms is safe for Vercel.
-        await sleep(1000); 
+        // Wait 2.5 seconds between generations to allow quota bucket to drain
+        if (i > 0) await sleep(2500); 
         
         try {
             const img = await executeWithRetry(async () => {
@@ -376,7 +381,7 @@ export const detectAndSplitCharacters = async (imageBase64: string): Promise<str
         
         // Throttled sequence
         for (const charName of characterList.slice(0, 4)) {
-             await sleep(1000); 
+             await sleep(2000); // 2s pause
              try {
                  const isolatePrompt = `Crop and isolate ONLY the ${charName} from this image. Place it on a PURE WHITE background. High resolution.`;
                  const resp = await ai.models.generateContent({
