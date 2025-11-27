@@ -13,12 +13,14 @@ export const cleanJsonString = (text: string) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- API KEY MANAGEMENT (VERCEL ENVIRONMENT VARIABLES) ---
-// Gets keys from process.env.API_KEY
-// Supports multiple keys separated by commas for load balancing (e.g. "Key1,Key2,Key3")
 const getApiKeys = (): string[] => {
-  const envKeys = process.env.API_KEY || "";
+  let envKeys = "";
+  // Safety check to prevent ReferenceError if process is not defined in browser
+  if (typeof process !== 'undefined' && process.env) {
+      envKeys = process.env.API_KEY || "";
+  }
+  
   if (!envKeys) return [];
-  // Split by comma and clean whitespace
   return envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
 };
 
@@ -28,7 +30,6 @@ let currentKeyIndex = 0;
 const getNextKey = () => {
   if (API_KEYS.length === 0) {
     console.error("NO API KEY FOUND. Please set API_KEY in Vercel Environment Variables.");
-    // Fallback meant to fail gracefully if env is missing
     return "";
   }
   const key = API_KEYS[currentKeyIndex];
@@ -40,7 +41,7 @@ const getNextKey = () => {
 const getAiClient = () => {
   const apiKey = getNextKey();
   if (!apiKey) {
-      throw new Error("Missing API Key in Environment Variables");
+      throw new Error("Missing API Key. Check Vercel Environment Variables.");
   }
   return new GoogleGenAI({ apiKey });
 };
