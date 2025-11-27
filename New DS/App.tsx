@@ -163,7 +163,7 @@ function App() {
          setIsApiKeyModalOpen(true);
          errorMessage = "API Key missing. Please check your settings.";
      } else if (errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("exhausted")) {
-        errorMessage = "Server busy (Rate Limit Hit). Please wait 10-15 seconds and try again.";
+        errorMessage = "Google API Quota Limit Reached (429). The system tried to retry but failed. Please use a Paid Key or wait 1-2 minutes.";
      }
      setError(errorMessage);
   };
