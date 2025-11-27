@@ -5,10 +5,11 @@ import { ResultsPanel } from './components/ResultsPanel';
 import { HistorySidebar } from './components/HistorySidebar';
 import { RedesignDetailModal } from './components/RedesignDetailModal';
 import { DesignAnalysisModal } from './components/DesignAnalysisModal';
-import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, detectAndSplitCharacters, generateRandomMockup } from './services/geminiService';
+import { ApiKeyModal } from './components/ApiKeyModal';
+import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, detectAndSplitCharacters, generateRandomMockup, hasValidKey, setManualKey } from './services/geminiService';
 import { sendDataToSheet } from './services/googleSheetService';
 import { ProductAnalysis, ProcessStage, PRODUCT_TYPES, HistoryItem, DesignMode, RopeType } from './types';
-import { AlertCircle, RefreshCw, Wand2, Sparkles, Paintbrush, Zap, Package, Eraser } from 'lucide-react';
+import { AlertCircle, RefreshCw, Wand2, Sparkles, Paintbrush, Zap, Package, Eraser, Key } from 'lucide-react';
 
 function App() {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -21,6 +22,10 @@ function App() {
   const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]); // Defaults to Auto-Detect
   const [designMode, setDesignMode] = useState<DesignMode>(DesignMode.NEW_CONCEPT);
   
+  // API Key & Modal State
+  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
+  const [hasKey, setHasKey] = useState(false);
+
   // Review Modal State
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
 
@@ -37,6 +42,7 @@ function App() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
   useEffect(() => {
+    // 1. Load History
     try {
       const savedHistory = localStorage.getItem('product_perfect_history');
       if (savedHistory) {
@@ -45,7 +51,20 @@ function App() {
     } catch (e) {
       console.error("Failed to load history", e);
     }
+
+    // 2. Check for API Key
+    const keyExists = hasValidKey();
+    setHasKey(keyExists);
+    if (!keyExists) {
+        setIsApiKeyModalOpen(true);
+    }
   }, []);
+
+  const handleSaveApiKey = (key: string) => {
+      setManualKey(key);
+      setHasKey(true);
+      setError(null);
+  };
 
   const saveHistoryToStorage = (items: HistoryItem[]) => {
     try {
@@ -108,6 +127,11 @@ function App() {
   };
 
   const processFile = (file: File) => {
+    if (!hasValidKey()) {
+        setIsApiKeyModalOpen(true);
+        return;
+    }
+
     setStage(ProcessStage.UPLOADING);
     setError(null);
     setProcessedImage(null);
@@ -134,7 +158,11 @@ function App() {
   const handleQuotaError = (err: any) => {
      console.error("Quota Error:", err);
      let errorMessage = err.message || "An unexpected error occurred.";
-     if (errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("exhausted")) {
+     
+     if (errorMessage.includes("MISSING_API_KEY")) {
+         setIsApiKeyModalOpen(true);
+         errorMessage = "API Key missing. Please check your settings.";
+     } else if (errorMessage.includes("429") || errorMessage.includes("quota") || errorMessage.includes("exhausted")) {
         errorMessage = "Server busy (Rate Limit Hit). Please wait 10-15 seconds and try again.";
      }
      setError(errorMessage);
@@ -333,14 +361,27 @@ function App() {
     <div className="min-h-screen bg-slate-950 flex flex-col relative overflow-x-hidden text-slate-200">
       <Header onHistoryClick={() => setIsHistoryOpen(true)} />
 
-      {/* Top Bar for Environment Info - Optional/Informational */}
+      {/* Top Bar for Environment Info */}
       <div className="bg-slate-900 border-b border-slate-800 py-2 px-4 shadow-sm z-30 relative">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center text-xs text-slate-400">
-             <div className="flex items-center bg-green-950/30 text-green-300 px-3 py-1.5 rounded-full border border-green-800/50">
-                  <Zap className="w-3.5 h-3.5 mr-1.5" />
-                  <span className="font-bold">Using Vercel Environment Key</span>
-             </div>
+             {hasKey ? (
+                 <button 
+                    onClick={() => setIsApiKeyModalOpen(true)}
+                    className="flex items-center bg-green-950/30 hover:bg-green-900/50 text-green-300 px-3 py-1.5 rounded-full border border-green-800/50 transition-colors"
+                 >
+                    <Zap className="w-3.5 h-3.5 mr-1.5" />
+                    <span className="font-bold">System Ready</span>
+                 </button>
+             ) : (
+                 <button 
+                    onClick={() => setIsApiKeyModalOpen(true)}
+                    className="flex items-center bg-red-950/30 hover:bg-red-900/50 text-red-300 px-3 py-1.5 rounded-full border border-red-800/50 animate-pulse transition-colors"
+                 >
+                    <Key className="w-3.5 h-3.5 mr-1.5" />
+                    <span className="font-bold">Missing API Key</span>
+                 </button>
+             )}
           </div>
         </div>
       </div>
@@ -470,6 +511,13 @@ function App() {
         history={history}
         onSelect={handleLoadHistory}
         onDelete={handleDeleteHistory}
+      />
+
+      <ApiKeyModal
+        isOpen={isApiKeyModalOpen}
+        hasKey={hasKey}
+        onSave={handleSaveApiKey}
+        onClose={() => setIsApiKeyModalOpen(false)}
       />
 
       {analysis && (
