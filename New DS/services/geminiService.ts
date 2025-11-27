@@ -13,13 +13,30 @@ export const cleanJsonString = (text: string) => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // --- API KEY MANAGEMENT ---
-const getApiKeys = (): string[] => {
-  let envKeys = "";
+export const hasValidKey = (): boolean => {
+    return getApiKeys().length > 0;
+};
 
-  // 1. Try process.env (Standard for Vercel/Next.js/CRA)
+export const setManualKey = (key: string) => {
+    if(typeof localStorage !== 'undefined') {
+        localStorage.setItem('gemini_api_key', key);
+    }
+};
+
+const getApiKeys = (): string[] => {
+  let keys: string[] = [];
+
+  // 1. Priority: Manual Key from LocalStorage (User entered in Modal)
+  if (typeof localStorage !== 'undefined') {
+      const manualKey = localStorage.getItem('gemini_api_key');
+      if (manualKey) {
+          return [manualKey];
+      }
+  }
+
+  // 2. Try process.env (Standard for Vercel/Next.js/CRA)
+  let envKeys = "";
   if (typeof process !== 'undefined' && process.env) {
-      // Check standard variable and framework-specific prefixes
-      // Note: Vercel Env Vars must be prefixed with NEXT_PUBLIC_ or VITE_ or REACT_APP_ to be exposed to client-side
       envKeys = process.env.API_KEY || 
                 process.env.NEXT_PUBLIC_API_KEY || 
                 process.env.VITE_API_KEY || 
@@ -27,7 +44,7 @@ const getApiKeys = (): string[] => {
                 "";
   }
 
-  // 2. Try import.meta.env (Vite specific)
+  // 3. Try import.meta.env (Vite specific)
   try {
      // @ts-ignore
      if (!envKeys && typeof import.meta !== 'undefined' && import.meta.env) {
@@ -39,31 +56,21 @@ const getApiKeys = (): string[] => {
   }
 
   if (envKeys) {
-      const keys = envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
-      if (keys.length > 0) return keys;
+      keys = envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
   }
 
-  // 3. FALLBACK: Use Hardcoded Pro Keys if Env Vars are missing/misconfigured.
-  // This ensures the app works immediately on Vercel without crashing.
-  console.warn("No Environment Variable found for API_KEY. Using Fallback Pro Keys.");
-  return [
-     "AIzaSyABqklwZahC-ixZ4vvQ28Gjl6Np4Q7qdwc",
-     "AIzaSyDXSPV_UcVjG4u03-197gcym3h9bavO20Q",
-     "AIzaSyBIuCGUzbmAQHQejpByAq1SZI6wOu9U7HM"
-  ];
+  return keys;
 };
 
-const API_KEYS = getApiKeys();
 let currentKeyIndex = 0;
 
 const getNextKey = () => {
-  if (API_KEYS.length === 0) {
-    // Should not happen due to fallback
-    console.error("NO API KEY FOUND.");
+  const keys = getApiKeys();
+  if (keys.length === 0) {
     return "";
   }
-  const key = API_KEYS[currentKeyIndex];
-  currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+  const key = keys[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % keys.length;
   return key;
 };
 
@@ -71,19 +78,26 @@ const getNextKey = () => {
 const getAiClient = () => {
   const apiKey = getNextKey();
   if (!apiKey) {
-      throw new Error("Missing API Key. Check Vercel Environment Variables or Fallback configuration.");
+      // This error will be caught by the UI to show the Modal
+      throw new Error("MISSING_API_KEY"); 
   }
   return new GoogleGenAI({ apiKey });
 };
 
 // Robust retry logic for API calls
 // Increased retry count and delays to handle 429 errors gracefully
-async function executeWithRetry<T>(operation: () => Promise<T>, retries = 5, initialDelay = 2000): Promise<T> {
+async function executeWithRetry<T>(operation: () => Promise<T>, retries = 3, initialDelay = 2000): Promise<T> {
     let currentDelay = initialDelay;
     for (let i = 0; i < retries; i++) {
         try {
             return await operation();
         } catch (error: any) {
+            
+            // Critical check for Missing Key during execution
+            if (error.message === "MISSING_API_KEY" || error.message?.includes("API key not valid")) {
+                throw error; // Propagate immediately to UI
+            }
+
             // Check for Rate Limit (429) or Quota Exhausted
             const isRateLimit = error?.status === 429 || error?.code === 429 || 
                                (error?.message && (error.message.includes('429') || error.message.includes('quota') || error.message.includes('exhausted')));
