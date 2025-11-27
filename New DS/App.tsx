@@ -4,10 +4,11 @@ import { FileUpload } from './components/FileUpload';
 import { ResultsPanel } from './components/ResultsPanel';
 import { HistorySidebar } from './components/HistorySidebar';
 import { RedesignDetailModal } from './components/RedesignDetailModal';
+import { DesignAnalysisModal } from './components/DesignAnalysisModal';
 import { cleanupProductImage, analyzeProductDesign, generateProductRedesigns, extractDesignElements, remixProductImage, detectAndSplitCharacters, generateRandomMockup } from './services/geminiService';
 import { sendDataToSheet } from './services/googleSheetService';
 import { ProductAnalysis, ProcessStage, PRODUCT_TYPES, HistoryItem, DesignMode, RopeType } from './types';
-import { AlertCircle, RefreshCw, Layers, Eraser, Sparkles, Zap, Package, Wand2, Paintbrush, AlertTriangle, Crown } from 'lucide-react';
+import { AlertCircle, RefreshCw, Wand2, Sparkles, Paintbrush, Zap, Package, Eraser } from 'lucide-react';
 
 function App() {
   const [originalImage, setOriginalImage] = useState<string | null>(null);
@@ -20,6 +21,9 @@ function App() {
   const [productType, setProductType] = useState<string>(PRODUCT_TYPES[0]); // Defaults to Auto-Detect
   const [designMode, setDesignMode] = useState<DesignMode>(DesignMode.NEW_CONCEPT);
   
+  // Review Modal State
+  const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
+
   // Remix / Detail Modal State
   const [selectedRedesignIndex, setSelectedRedesignIndex] = useState<number | null>(null);
   const [isDetailModalOpen, setIsDetailModalOpen] = useState(false);
@@ -166,15 +170,35 @@ function App() {
       const extracted = await extractDesignElements(image);
       setExtractedElements(extracted);
       
-      // 4. Generate
+      // 4. Review (Stop here and show Modal)
       if (analysisResult && analysisResult.redesignPrompt) {
-         setStage(ProcessStage.GENERATING);
-         
+         setStage(ProcessStage.REVIEW);
+         setIsReviewModalOpen(true);
+      } else {
+         throw new Error("Analysis failed to generate a prompt.");
+      }
+
+    } catch (err: any) {
+      console.error(err);
+      handleQuotaError(err);
+      if (stage !== ProcessStage.COMPLETE && stage !== ProcessStage.REVIEW) {
+         setStage(ProcessStage.IDLE);
+      }
+    }
+  };
+
+  const handleGenerateConfirm = async (selectedComponents: string[], userNotes: string, ropeType: RopeType) => {
+      setIsReviewModalOpen(false);
+      setStage(ProcessStage.GENERATING);
+      
+      try {
+         if (!analysis || !analysis.redesignPrompt) throw new Error("Missing analysis data");
+
          const redesigns = await generateProductRedesigns(
-            analysisResult.redesignPrompt, 
-            RopeType.NONE, 
-            [], 
-            "", 
+            analysis.redesignPrompt, 
+            ropeType, 
+            selectedComponents, 
+            userNotes, 
             productType,
             false // useUltra deprecated
          );
@@ -185,28 +209,26 @@ function App() {
          // 5. Send to Google Sheet (Hidden Background Process)
          sendDataToSheet(
             redesigns, 
-            analysisResult.redesignPrompt, 
-            analysisResult.description || "N/A"
+            analysis.redesignPrompt, 
+            analysis.description || "N/A"
          ).catch(e => console.error("Sheet logging failed silently", e));
 
          addToHistory(
-            image, 
-            cleaned, 
-            analysisResult, 
+            originalImage!, 
+            processedImage, 
+            analysis, 
             redesigns, 
             productType, 
             designMode,
-            RopeType.NONE
+            ropeType
          );
-      }
 
-    } catch (err: any) {
-      console.error(err);
-      handleQuotaError(err);
-      if (stage !== ProcessStage.COMPLETE) {
-         setStage(ProcessStage.IDLE);
+      } catch (err: any) {
+          console.error(err);
+          handleQuotaError(err);
+          setStage(ProcessStage.REVIEW); // Go back to review on error
+          setIsReviewModalOpen(true);
       }
-    }
   };
 
   const handleRedesignClick = (index: number) => {
@@ -449,6 +471,19 @@ function App() {
         onSelect={handleLoadHistory}
         onDelete={handleDeleteHistory}
       />
+
+      {analysis && (
+        <DesignAnalysisModal
+          isOpen={isReviewModalOpen}
+          onClose={() => {
+              setIsReviewModalOpen(false);
+              setStage(ProcessStage.IDLE); // Or handle cancel
+          }}
+          analysis={analysis}
+          extractedElements={extractedElements}
+          onGenerate={handleGenerateConfirm}
+        />
+      )}
 
       {generatedRedesigns && selectedRedesignIndex !== null && (
         <RedesignDetailModal
