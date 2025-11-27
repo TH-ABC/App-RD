@@ -12,16 +12,45 @@ export const cleanJsonString = (text: string) => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// --- API KEY MANAGEMENT (VERCEL ENVIRONMENT VARIABLES) ---
+// --- API KEY MANAGEMENT ---
 const getApiKeys = (): string[] => {
   let envKeys = "";
-  // Safety check to prevent ReferenceError if process is not defined in browser
+
+  // 1. Try process.env (Standard for Vercel/Next.js/CRA)
   if (typeof process !== 'undefined' && process.env) {
-      envKeys = process.env.API_KEY || "";
+      // Check standard variable and framework-specific prefixes
+      // Note: Vercel Env Vars must be prefixed with NEXT_PUBLIC_ or VITE_ or REACT_APP_ to be exposed to client-side
+      envKeys = process.env.API_KEY || 
+                process.env.NEXT_PUBLIC_API_KEY || 
+                process.env.VITE_API_KEY || 
+                process.env.REACT_APP_API_KEY || 
+                "";
   }
-  
-  if (!envKeys) return [];
-  return envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
+
+  // 2. Try import.meta.env (Vite specific)
+  try {
+     // @ts-ignore
+     if (!envKeys && typeof import.meta !== 'undefined' && import.meta.env) {
+        // @ts-ignore
+        envKeys = import.meta.env.VITE_API_KEY || import.meta.env.API_KEY || "";
+     }
+  } catch (e) {
+     // Ignore errors in environments that don't support import.meta
+  }
+
+  if (envKeys) {
+      const keys = envKeys.split(',').map(k => k.trim()).filter(k => k.length > 0);
+      if (keys.length > 0) return keys;
+  }
+
+  // 3. FALLBACK: Use Hardcoded Pro Keys if Env Vars are missing/misconfigured.
+  // This ensures the app works immediately on Vercel without crashing.
+  console.warn("No Environment Variable found for API_KEY. Using Fallback Pro Keys.");
+  return [
+     "AIzaSyABqklwZahC-ixZ4vvQ28Gjl6Np4Q7qdwc",
+     "AIzaSyDXSPV_UcVjG4u03-197gcym3h9bavO20Q",
+     "AIzaSyBIuCGUzbmAQHQejpByAq1SZI6wOu9U7HM"
+  ];
 };
 
 const API_KEYS = getApiKeys();
@@ -29,7 +58,8 @@ let currentKeyIndex = 0;
 
 const getNextKey = () => {
   if (API_KEYS.length === 0) {
-    console.error("NO API KEY FOUND. Please set API_KEY in Vercel Environment Variables.");
+    // Should not happen due to fallback
+    console.error("NO API KEY FOUND.");
     return "";
   }
   const key = API_KEYS[currentKeyIndex];
@@ -41,7 +71,7 @@ const getNextKey = () => {
 const getAiClient = () => {
   const apiKey = getNextKey();
   if (!apiKey) {
-      throw new Error("Missing API Key. Check Vercel Environment Variables.");
+      throw new Error("Missing API Key. Check Vercel Environment Variables or Fallback configuration.");
   }
   return new GoogleGenAI({ apiKey });
 };
